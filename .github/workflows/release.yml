@@ -1,0 +1,92 @@
+name: Release portable
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: |
+          dotnet restore ProxySentryCsv.WinUI/ProxySentryCsv.WinUI.csproj -r win-x64
+          dotnet restore ProxySentryCsv.Launcher/ProxySentryCsv.Launcher.csproj -r win-x64
+
+      - name: Build
+        run: dotnet build ProxySentryCSV.sln -c Release --no-restore
+
+      - name: Publish
+        run: |
+          dotnet publish ProxySentryCsv.WinUI/ProxySentryCsv.WinUI.csproj -c Release -p:Platform=x64 -r win-x64 --self-contained true -o release/components
+          dotnet publish ProxySentryCsv.Launcher/ProxySentryCsv.Launcher.csproj -c Release -r win-x64 --self-contained true -o release/launcher
+
+      - name: Pack portable folder
+        shell: pwsh
+        run: |
+          $root = "release/ProxySentryCSV-portable"
+          $components = Join-Path $root "components"
+          New-Item -ItemType Directory -Force -Path $components | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $root "Data") | Out-Null
+
+          Copy-Item -Recurse -Force "release/components/*" $components
+          Copy-Item -Force "release/launcher/Proxy Sentry CSV.exe" (Join-Path $root "Proxy Sentry CSV.exe")
+          Copy-Item -Force "ProxySentryCsv.WinUI/README-ProxySentryCSV.txt" (Join-Path $root "README-ProxySentryCSV.txt")
+
+          if (-not (Test-Path (Join-Path $root "Proxy Sentry CSV.exe"))) {
+            throw "Proxy Sentry CSV launcher is missing from portable package."
+          }
+          if (-not (Test-Path (Join-Path $components "Proxy Sentry CSV.exe"))) {
+            throw "Proxy Sentry CSV component executable is missing from portable package."
+          }
+
+          Compress-Archive -Path $root -DestinationPath "release/ProxySentryCSV-portable-win10-win11.zip" -CompressionLevel Optimal -Force
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: ProxySentryCSV-portable-win10-win11
+          path: release/ProxySentryCSV-portable-win10-win11.zip
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zip = "release/ProxySentryCSV-portable-win10-win11.zip"
+          $title = "Proxy Sentry CSV $tag"
+          $notesFile = ".github/release-notes/$tag.md"
+          if (gh release view $tag 2>$null) {
+            if (Test-Path $notesFile) {
+              gh release edit $tag --title $title --notes-file $notesFile
+            } else {
+              gh release edit $tag --title $title --notes "Portable Windows 10/11 build."
+            }
+            gh release upload $tag $zip --clobber
+          } else {
+            if (Test-Path $notesFile) {
+              gh release create $tag $zip --title $title --notes-file $notesFile
+            } else {
+              gh release create $tag $zip --title $title --notes "Portable Windows 10/11 build."
+            }
+          }
+
