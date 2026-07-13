@@ -37,7 +37,8 @@ public sealed class AppStateStore
                 IsFavorite = proxy.IsFavorite,
                 PingMs = proxy.PingMs,
                 ResponseMs = proxy.ResponseMs,
-                SpeedGroup = proxy.SpeedGroup
+                SpeedGroup = proxy.SpeedGroup,
+                BrowserProvider = proxy.BrowserProvider
             },
             StringComparer.OrdinalIgnoreCase);
 
@@ -86,6 +87,7 @@ public sealed class AppStateStore
         public string JancyEndpointUrl { get; set; } = "http://127.0.0.1:43033";
         public bool AutoUpdateEnabled { get; set; }
         public string GitRepositoryPath { get; set; } = "";
+        public string LastUpdatePreviousHead { get; set; } = "";
     }
 
     public sealed class ProxyPersistedState
@@ -97,6 +99,7 @@ public sealed class AppStateStore
         public int? PingMs { get; set; }
         public int? ResponseMs { get; set; }
         public string SpeedGroup { get; set; } = "Unchecked";
+        public string BrowserProvider { get; set; } = "jancy";
     }
 
     private sealed class AppState

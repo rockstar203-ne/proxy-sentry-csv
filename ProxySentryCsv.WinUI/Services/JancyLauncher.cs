@@ -9,7 +9,7 @@ public sealed class JancyLauncher
 {
     private const string BridgeFileName = "proxy-sentry-csv.jyl";
     private const string LegacyBridgeFileName = "axs-proxy-launcher.jyl";
-    private const string BridgeVersion = "1.13";
+    private const string BridgeVersion = "1.14";
     private const string EndpointPath = "proxy-sentry-csv";
     private const string ProfileGroupName = "Proxy Sentry CSV";
     private const string EmailDomain = "proxy-sentry-csv.local";
@@ -165,6 +165,38 @@ public sealed class JancyLauncher
         await SendAsync(endpoint, "sync-stop", new Dictionary<string, string?>());
     }
 
+    public async Task ArrangeAsync(IReadOnlyList<ProxyEntry> proxies, string endpointUrl, SyncMonitorOption? monitor)
+    {
+        if (proxies.Count < 2)
+        {
+            throw new InvalidOperationException("Select at least two opened Jancy rows to align.");
+        }
+
+        if (monitor is null)
+        {
+            throw new InvalidOperationException("Select a sync monitor before aligning windows.");
+        }
+
+        var bridgePath = InstallBridge();
+        var endpoint = NormalizeEndpoint(endpointUrl);
+        await EnsureBridgeLoadedAsync(endpoint, bridgePath);
+        var query = new Dictionary<string, string?>
+        {
+            ["stableIds"] = string.Join(",", proxies.Select(proxy => proxy.StableId))
+        };
+
+        for (var index = 0; index < proxies.Count; index++)
+        {
+            var rect = ComputeWindowRect(monitor, index, proxies.Count);
+            query[$"x{index}"] = rect.X.ToString();
+            query[$"y{index}"] = rect.Y.ToString();
+            query[$"width{index}"] = rect.Width.ToString();
+            query[$"height{index}"] = rect.Height.ToString();
+        }
+
+        await SendAsync(endpoint, "arrange", query);
+    }
+
     public async Task<IReadOnlyList<string>> ListAsync(string endpointUrl)
     {
         var endpoint = NormalizeEndpoint(endpointUrl);
@@ -297,15 +329,22 @@ public sealed class JancyLauncher
 
     private static WindowRect ComputeWindowRect(SyncMonitorOption monitor, int index, int count)
     {
-        var columns = count <= 4 ? count : count <= 6 ? 3 : 4;
+        var columns = count switch
+        {
+            <= 1 => 1,
+            <= 4 => 2,
+            <= 9 => 3,
+            _ => 4
+        };
         var rows = (int)Math.Ceiling(count / (double)columns);
-        var width = Math.Max(360, monitor.AvailWidth / columns);
-        var height = Math.Max(320, monitor.AvailHeight / rows);
+        const int gap = 8;
+        var width = Math.Max(240, (monitor.AvailWidth - (columns - 1) * gap) / columns);
+        var height = Math.Max(220, (monitor.AvailHeight - (rows - 1) * gap) / rows);
         var col = index % columns;
         var row = index / columns;
         return new WindowRect(
-            monitor.AvailLeft + col * width,
-            monitor.AvailTop + row * height,
+            monitor.AvailLeft + col * (width + gap),
+            monitor.AvailTop + row * (height + gap),
             width,
             height);
     }
@@ -326,9 +365,9 @@ public sealed class JancyLauncher
     }
 
 private const string BridgeJyl = """
-<jyl user-version="1.13" user-desc="Proxy Sentry CSV bridge">
+<jyl user-version="1.14" user-desc="Proxy Sentry CSV bridge">
   <webinterface-endpoint path="proxy-sentry-csv/version">
-    return { success: true, version: "1.13" };
+    return { success: true, version: "1.14" };
   </webinterface-endpoint>
 
   <webinterface-endpoint path="proxy-sentry-csv/list">
@@ -669,6 +708,177 @@ private const string BridgeJyl = """
     }
   </webinterface-endpoint>
 
+  <webinterface-endpoint path="proxy-sentry-csv/arrange">
+    try {
+      function decodeQueryValue(value) {
+        value = String(value || "").replace(/\+/g, " ");
+        try {
+          return decodeURIComponent(value);
+        }
+        catch (err) {
+          return value;
+        }
+      }
+
+      function getParam(name) {
+        if (parsedURL) {
+          if (parsedURL.searchParams && parsedURL.searchParams.get) {
+            var directValue = parsedURL.searchParams.get(name);
+            if (directValue !== undefined && directValue !== null) {
+              return directValue;
+            }
+          }
+
+          if (parsedURL.query && typeof parsedURL.query === "object") {
+            var objectValue = parsedURL.query[name];
+            if (objectValue !== undefined && objectValue !== null) {
+              if (objectValue && objectValue.length && typeof objectValue !== "string") {
+                objectValue = objectValue[0];
+              }
+              return String(objectValue);
+            }
+          }
+        }
+
+        var raw = "";
+        if (parsedURL) {
+          if (typeof parsedURL.query === "string") {
+            raw = parsedURL.query;
+          }
+          else if (typeof parsedURL.search === "string") {
+            raw = parsedURL.search;
+          }
+          else if (typeof parsedURL.href === "string") {
+            raw = parsedURL.href;
+          }
+          else if (typeof parsedURL.path === "string") {
+            raw = parsedURL.path;
+          }
+        }
+
+        if (!raw && req && typeof req.url === "string") {
+          raw = req.url;
+        }
+
+        var questionIndex = raw.indexOf("?");
+        if (questionIndex >= 0) {
+          raw = raw.slice(questionIndex + 1);
+        }
+        if (raw.charAt(0) === "?") {
+          raw = raw.slice(1);
+        }
+        if (!raw) {
+          return null;
+        }
+
+        var parts = raw.split("&");
+        for (var i = 0; i !== parts.length; i = i + 1) {
+          var part = parts[i];
+          if (!part) {
+            continue;
+          }
+
+          var equalsIndex = part.indexOf("=");
+          var key = equalsIndex >= 0 ? part.slice(0, equalsIndex) : part;
+          var value = equalsIndex >= 0 ? part.slice(equalsIndex + 1) : "";
+          if (decodeQueryValue(key) === name) {
+            return decodeQueryValue(value);
+          }
+        }
+
+        return null;
+      }
+
+      function splitStableIds(value) {
+        var parts = String(value || "").split(",");
+        var ids = [];
+        for (var i = 0; i !== parts.length; i = i + 1) {
+          var id = String(parts[i] || "").trim();
+          if (id) {
+            ids.push(id);
+          }
+        }
+        return ids;
+      }
+
+      function windowHasManagedTab(tw, stableId) {
+        if (!tw || !tw.getTabs) {
+          return false;
+        }
+        var tabs = tw.getTabs();
+        for (var i = 0; tabs && i !== tabs.length; i = i + 1) {
+          var data = tabs[i].data || {};
+          if (data.proxySentryCsvStableId === stableId) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      function getWindowForStableId(stableId) {
+        if (!jancy.windowManager || !jancy.windowManager.getWindows) {
+          return null;
+        }
+        var windows = jancy.windowManager.getWindows(0);
+        for (var i = 0; windows && i !== windows.length; i = i + 1) {
+          if (windowHasManagedTab(windows[i], stableId)) {
+            return windows[i];
+          }
+        }
+        return null;
+      }
+
+      function applyBounds(tw, x, y, width, height) {
+        if (!tw) {
+          return false;
+        }
+        var bounds = { x: x, y: y, width: width, height: height };
+        if (tw.browserWindow && tw.browserWindow.setBounds) {
+          tw.browserWindow.setBounds(bounds);
+          return true;
+        }
+        if (tw.setBounds) {
+          tw.setBounds(bounds);
+          return true;
+        }
+        if (tw.browserWindow && tw.browserWindow.setPosition && tw.browserWindow.setSize) {
+          tw.browserWindow.setPosition(x, y);
+          tw.browserWindow.setSize(width, height);
+          return true;
+        }
+        if (tw.setPosition && tw.setSize) {
+          tw.setPosition(x, y);
+          tw.setSize(width, height);
+          return true;
+        }
+        return false;
+      }
+
+      var stableIds = splitStableIds(getParam("stableIds") || "");
+      var arranged = 0;
+      for (var index = 0; index !== stableIds.length; index = index + 1) {
+        var x = parseInt(getParam("x" + index) || "", 10);
+        var y = parseInt(getParam("y" + index) || "", 10);
+        var width = parseInt(getParam("width" + index) || "", 10);
+        var height = parseInt(getParam("height" + index) || "", 10);
+        if (isNaN(x) || isNaN(y) || isNaN(width) || isNaN(height)) {
+          continue;
+        }
+        if (applyBounds(getWindowForStableId(stableIds[index]), x, y, width, height)) {
+          arranged = arranged + 1;
+        }
+      }
+
+      return { success: true, arranged: arranged };
+    }
+    catch (err) {
+      return {
+        success: false,
+        message: err ? (err.message ? err.message : String(err)) : "unknown Jancy bridge error"
+      };
+    }
+  </webinterface-endpoint>
+
   <webinterface-endpoint path="proxy-sentry-csv/sync-start">
     try {
       function decodeQueryValue(value) {
@@ -836,10 +1046,11 @@ private const string BridgeJyl = """
       }
 
       function syncCaptureScript() {
-        if (window.__proxySentryCsvSyncInstalled) {
+        if (window.__proxySentryCsvSyncInstalled && window.__proxySentryCsvSyncVersion === "1.14") {
           return true;
         }
         window.__proxySentryCsvSyncInstalled = true;
+        window.__proxySentryCsvSyncVersion = "1.14";
         window.__proxySentryCsvSyncQueue = [];
 
         function cssEscape(value) {
@@ -917,7 +1128,7 @@ private const string BridgeJyl = """
         function pushEvent(payload) {
           try {
             window.__proxySentryCsvSyncQueue.push(payload);
-            if (window.__proxySentryCsvSyncQueue.length > 800) {
+            if (window.__proxySentryCsvSyncQueue.length > 2000) {
               window.__proxySentryCsvSyncQueue.shift();
             }
           }
@@ -925,8 +1136,7 @@ private const string BridgeJyl = """
           }
         }
 
-        document.addEventListener("click", function(event) {
-          var payload = baseEvent("click", event.target);
+        function addPointerPayload(payload, event) {
           payload.button = event.button || 0;
           payload.detail = event.detail || 1;
           payload.ctrlKey = !!event.ctrlKey;
@@ -935,6 +1145,42 @@ private const string BridgeJyl = """
           payload.metaKey = !!event.metaKey;
           payload.xRatio = window.innerWidth ? event.clientX / window.innerWidth : 0;
           payload.yRatio = window.innerHeight ? event.clientY / window.innerHeight : 0;
+          payload.movementX = event.movementX || 0;
+          payload.movementY = event.movementY || 0;
+          return payload;
+        }
+
+        var lastMoveTime = 0;
+        var lastMouseUpTime = 0;
+        function capturePointer(type, event) {
+          if (type === "mouseMove") {
+            var now = Date.now();
+            if (now - lastMoveTime < 16) {
+              return;
+            }
+            lastMoveTime = now;
+          }
+          pushEvent(addPointerPayload(baseEvent(type, event.target), event));
+        }
+
+        document.addEventListener("mousemove", function(event) {
+          capturePointer("mouseMove", event);
+        }, true);
+
+        document.addEventListener("mousedown", function(event) {
+          capturePointer("mouseDown", event);
+        }, true);
+
+        document.addEventListener("mouseup", function(event) {
+          lastMouseUpTime = Date.now();
+          capturePointer("mouseUp", event);
+        }, true);
+
+        document.addEventListener("click", function(event) {
+          if (Date.now() - lastMouseUpTime < 120) {
+            return;
+          }
+          var payload = addPointerPayload(baseEvent("click", event.target), event);
           pushEvent(payload);
         }, true);
 
@@ -1018,10 +1264,11 @@ private const string BridgeJyl = """
       }
 
       function syncReplayScript() {
-        if (window.__proxySentryCsvSyncReplayInstalled) {
+        if (window.__proxySentryCsvSyncReplayInstalled && window.__proxySentryCsvSyncReplayVersion === "1.14") {
           return true;
         }
         window.__proxySentryCsvSyncReplayInstalled = true;
+        window.__proxySentryCsvSyncReplayVersion = "1.14";
 
         function findTarget(selector) {
           if (!selector) {
@@ -1035,21 +1282,25 @@ private const string BridgeJyl = """
           }
         }
 
-        function dispatchMouse(target, x, y) {
+        function dispatchMouse(target, eventType, event) {
           if (!target) {
             return;
           }
+          var x = window.innerWidth ? Number(event.xRatio || 0) * window.innerWidth : 0;
+          var y = window.innerHeight ? Number(event.yRatio || 0) * window.innerHeight : 0;
           var options = {
             bubbles: true,
             cancelable: true,
             view: window,
             clientX: x,
             clientY: y,
-            button: 0
+            button: event.button || 0,
+            ctrlKey: !!event.ctrlKey,
+            shiftKey: !!event.shiftKey,
+            altKey: !!event.altKey,
+            metaKey: !!event.metaKey
           };
-          target.dispatchEvent(new MouseEvent("mousedown", options));
-          target.dispatchEvent(new MouseEvent("mouseup", options));
-          target.dispatchEvent(new MouseEvent("click", options));
+          target.dispatchEvent(new MouseEvent(eventType, options));
         }
 
         function setElementValue(target, value, checked) {
@@ -1083,6 +1334,9 @@ private const string BridgeJyl = """
             try {
               if (event.type === "input") {
                 setElementValue(findTarget(event.selector), event.value || "", event.checked);
+              }
+              else if (event.type === "click") {
+                dispatchMouse(findTarget(event.selector), "click", event);
               }
               else if (event.type === "scroll") {
                 var doc = document.documentElement;
@@ -1133,13 +1387,29 @@ private const string BridgeJyl = """
             for (var index = 0; index !== events.length; index = index + 1) {
               var event = events[index] || {};
               try {
-                if (event.type === "click") {
+                if (event.type === "mouseMove") {
+                  var moveX = Math.max(1, Math.min(width - 1, Number(event.xRatio || 0) * width));
+                  var moveY = Math.max(1, Math.min(height - 1, Number(event.yRatio || 0) * height));
+                  wc.sendInputEvent({
+                    type: "mouseMove",
+                    x: moveX,
+                    y: moveY,
+                    movementX: Number(event.movementX || 0),
+                    movementY: Number(event.movementY || 0)
+                  });
+                }
+                else if (event.type === "mouseDown" || event.type === "mouseUp") {
                   var clickX = Math.max(1, Math.min(width - 1, Number(event.xRatio || 0) * width));
                   var clickY = Math.max(1, Math.min(height - 1, Number(event.yRatio || 0) * height));
                   var buttonName = nativeButtonName(event.button || 0);
                   var clickCount = event.detail || 1;
-                  wc.sendInputEvent({ type: "mouseDown", x: clickX, y: clickY, button: buttonName, clickCount: clickCount });
-                  wc.sendInputEvent({ type: "mouseUp", x: clickX, y: clickY, button: buttonName, clickCount: clickCount });
+                  wc.sendInputEvent({
+                    type: event.type,
+                    x: clickX,
+                    y: clickY,
+                    button: buttonName,
+                    clickCount: clickCount
+                  });
                 }
                 else if (event.type === "wheel") {
                   var wheelX = Math.max(1, Math.min(width - 1, Number(event.xRatio || 0) * width));
@@ -1280,7 +1550,7 @@ private const string BridgeJyl = """
                 state.lastError = err ? (err.message ? err.message : String(err)) : "capture failed";
                 state.busy = false;
               });
-          }, 60);
+          }, 20);
 
           return send({ success: true, masterStableId: masterStableId, followers: followerCount });
         })

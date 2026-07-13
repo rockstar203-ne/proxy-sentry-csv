@@ -27,6 +27,8 @@ public sealed partial class MainWindow : Window
     private string _jancyEndpointUrl = "http://127.0.0.1:43033";
     private bool _autoUpdateEnabled;
     private string _gitRepositoryPath = "";
+    private string _defaultBrowserProvider = "jancy";
+    private string _lastUpdatePreviousHead = "";
     private bool _suppressStateSave;
     private List<string> _lastJancySyncStableIds = [];
 
@@ -81,27 +83,9 @@ public sealed partial class MainWindow : Window
         {
             try
             {
-                proxy.Status = "Closing";
-                if (string.Equals(proxy.OpenedProvider, "jancy", StringComparison.OrdinalIgnoreCase))
-                {
-                    await _jancyLauncher.CloseAsync(proxy, _jancyEndpointUrl);
-                    proxy.IsOpen = false;
-                    proxy.OpenedProvider = "";
-                    proxy.Status = "Closed";
-                }
-                else if (SystemBrowserLauncher.IsSystemBrowser(proxy.OpenedProvider))
-                {
-                    _systemBrowserLauncher.Close(proxy);
-                    proxy.IsOpen = false;
-                    proxy.OpenedProvider = "";
-                    proxy.Status = "Closed";
-                }
-                else
-                {
-                    proxy.IsOpen = false;
-                    proxy.OpenedProvider = "";
-                    proxy.Status = "Closed";
-                }
+                await CloseProxyWindowAsync(proxy);
+                SaveState();
+                UpdateSummary();
             }
             catch (Exception ex)
             {
@@ -122,7 +106,8 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            var provider = GetSelectedBrowserProvider();
+            var provider = NormalizeBrowserProvider(proxy.BrowserProvider);
+            proxy.BrowserProvider = provider;
             if (string.Equals(provider, "jancy", StringComparison.OrdinalIgnoreCase))
             {
                 _jancyLauncher.ExportProfiles(GetAllLoadedProxies(), targetUrl);
@@ -153,6 +138,23 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private async Task CloseProxyWindowAsync(ProxyEntry proxy)
+    {
+        proxy.Status = "Closing";
+        if (string.Equals(proxy.OpenedProvider, "jancy", StringComparison.OrdinalIgnoreCase))
+        {
+            await _jancyLauncher.CloseAsync(proxy, _jancyEndpointUrl);
+        }
+        else if (SystemBrowserLauncher.IsSystemBrowser(proxy.OpenedProvider))
+        {
+            _systemBrowserLauncher.Close(proxy);
+        }
+
+        proxy.IsOpen = false;
+        proxy.OpenedProvider = "";
+        proxy.Status = "Closed";
+    }
+
     private async void OpenSyncGroup_Click(object sender, RoutedEventArgs e)
     {
         var selected = GetSyncSelectedProxies();
@@ -172,9 +174,9 @@ public sealed partial class MainWindow : Window
         OpenSyncGroupButton.IsEnabled = false;
         try
         {
-            if (!IsJancySelected())
+            if (selected.Any(proxy => !IsJancyProvider(proxy.BrowserProvider)))
             {
-                ShowMessage("Sync group is available only for Jancy controlled windows. Select Jancy as the browser provider.", InfoBarSeverity.Warning);
+                ShowMessage("Sync group is available only for rows where Browser is Jancy.", InfoBarSeverity.Warning);
                 return;
             }
 
@@ -224,68 +226,54 @@ public sealed partial class MainWindow : Window
 
     private async void StartSync_Click(object sender, RoutedEventArgs e)
     {
-        if (IsJancySelected())
+        var selected = GetJancySyncRows();
+        if (selected.Count < 2)
         {
-            var selected = GetJancySyncRows();
-            if (selected.Count < 2)
-            {
-                ShowMessage("Select at least two opened Jancy rows, or use Open sync group first.", InfoBarSeverity.Warning);
-                return;
-            }
-
-            try
-            {
-                StartSyncButton.IsEnabled = false;
-                await _jancyLauncher.StartSyncAsync(selected, _jancyEndpointUrl);
-                for (var index = 0; index < selected.Count; index++)
-                {
-                    selected[index].Status = index == 0 ? "Sync master" : "Sync follower";
-                }
-                _lastJancySyncStableIds = selected.Select(proxy => proxy.StableId).ToList();
-                ShowMessage($"Jancy sync started: master row {selected[0].RowNumber}, {selected.Count - 1} followers.", InfoBarSeverity.Success);
-            }
-            catch (Exception ex)
-            {
-                ShowMessage(ex.Message, InfoBarSeverity.Error);
-            }
-            finally
-            {
-                StartSyncButton.IsEnabled = true;
-            }
-
+            ShowMessage("Select at least two opened Jancy rows, or use Open sync group first.", InfoBarSeverity.Warning);
             return;
         }
 
-        ShowMessage("Sync is available only for Jancy controlled windows.", InfoBarSeverity.Warning);
+        try
+        {
+            StartSyncButton.IsEnabled = false;
+            await _jancyLauncher.StartSyncAsync(selected, _jancyEndpointUrl);
+            for (var index = 0; index < selected.Count; index++)
+            {
+                selected[index].Status = index == 0 ? "Sync master" : "Sync follower";
+            }
+            _lastJancySyncStableIds = selected.Select(proxy => proxy.StableId).ToList();
+            ShowMessage($"Jancy sync started: master row {selected[0].RowNumber}, {selected.Count - 1} followers.", InfoBarSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(ex.Message, InfoBarSeverity.Error);
+        }
+        finally
+        {
+            StartSyncButton.IsEnabled = true;
+        }
     }
 
     private async void StopSync_Click(object sender, RoutedEventArgs e)
     {
-        if (IsJancySelected())
+        try
         {
-            try
+            StopSyncButton.IsEnabled = false;
+            await _jancyLauncher.StopSyncAsync(_jancyEndpointUrl);
+            foreach (var proxy in GetJancySyncRows())
             {
-                StopSyncButton.IsEnabled = false;
-                await _jancyLauncher.StopSyncAsync(_jancyEndpointUrl);
-                foreach (var proxy in GetJancySyncRows())
-                {
-                    proxy.Status = proxy.IsOpen ? "Jancy opened" : proxy.Status;
-                }
-                ShowMessage("Jancy sync stopped. Browser windows stay open.", InfoBarSeverity.Informational);
+                proxy.Status = proxy.IsOpen ? "Jancy opened" : proxy.Status;
             }
-            catch (Exception ex)
-            {
-                ShowMessage(ex.Message, InfoBarSeverity.Warning);
-            }
-            finally
-            {
-                StopSyncButton.IsEnabled = true;
-            }
-
-            return;
+            ShowMessage("Jancy sync stopped. Browser windows stay open.", InfoBarSeverity.Informational);
         }
-
-        ShowMessage("Sync is available only for Jancy controlled windows.", InfoBarSeverity.Warning);
+        catch (Exception ex)
+        {
+            ShowMessage(ex.Message, InfoBarSeverity.Warning);
+        }
+        finally
+        {
+            StopSyncButton.IsEnabled = true;
+        }
     }
 
     private List<ProxyEntry> GetJancySyncRows()
@@ -305,7 +293,7 @@ public sealed partial class MainWindow : Window
             return selected;
         }
 
-        var activeByStableId = Proxies
+        var activeByStableId = GetAllLoadedProxies()
             .Where(proxy => proxy.IsOpen
                 && string.Equals(proxy.OpenedProvider, "jancy", StringComparison.OrdinalIgnoreCase))
             .ToDictionary(proxy => proxy.StableId, StringComparer.Ordinal);
@@ -322,9 +310,85 @@ public sealed partial class MainWindow : Window
         SaveState();
     }
 
-    private void BrowserProviderBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void ProxyBrowser_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         SaveState();
+    }
+
+    private async void RemoveList_Click(object sender, RoutedEventArgs e)
+    {
+        await RemoveProxyListAsync(_activeList);
+    }
+
+    private async void RemoveListItem_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is ProxyListEntry list)
+        {
+            await RemoveProxyListAsync(list);
+        }
+    }
+
+    private async Task RemoveProxyListAsync(ProxyListEntry? list)
+    {
+        if (list is null)
+        {
+            ShowMessage("Select a CSV list to remove.", InfoBarSeverity.Warning);
+            return;
+        }
+
+        if (list.IsFavorites)
+        {
+            ShowMessage("Favorites is a virtual list and cannot be removed.", InfoBarSeverity.Warning);
+            return;
+        }
+
+        var openRows = list.Items.Where(proxy => proxy.IsOpen).ToList();
+        foreach (var proxy in openRows)
+        {
+            await CloseProxyWindowAsync(proxy);
+        }
+
+        ProxyLists.Remove(list);
+        RefreshFavoritesList();
+        _activeList = ProxyLists.FirstOrDefault(proxyList => !proxyList.IsFavorites) ?? _favoritesList;
+        ProxyListsView.SelectedItem = _activeList;
+        RefreshVisibleProxies();
+        SaveState();
+        UpdateSummary();
+        ShowMessage(openRows.Count == 0
+            ? $"Removed list {list.Name}."
+            : $"Removed list {list.Name} and closed {openRows.Count} browser window(s).", InfoBarSeverity.Success);
+    }
+
+    private async void AlignSelected_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = GetJancySyncRows();
+        if (selected.Count < 2)
+        {
+            ShowMessage("Select at least two opened Jancy rows to align.", InfoBarSeverity.Warning);
+            return;
+        }
+
+        try
+        {
+            AlignSelectedButton.IsEnabled = false;
+            var monitor = SyncMonitorBox.SelectedItem as SyncMonitorOption;
+            await _jancyLauncher.ArrangeAsync(selected, _jancyEndpointUrl, monitor);
+            _lastJancySyncStableIds = selected.Select(proxy => proxy.StableId).ToList();
+            for (var index = 0; index < selected.Count; index++)
+            {
+                selected[index].Status = index == 0 ? "Aligned master" : "Aligned follower";
+            }
+            ShowMessage($"Aligned {selected.Count} Jancy windows.", InfoBarSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(ex.Message, InfoBarSeverity.Error);
+        }
+        finally
+        {
+            AlignSelectedButton.IsEnabled = true;
+        }
     }
 
     private void InstallJancyBridge_Click(object sender, RoutedEventArgs e)
@@ -364,37 +428,6 @@ public sealed partial class MainWindow : Window
         SaveState();
     }
 
-    private void ClearCookies_Click(object sender, RoutedEventArgs e)
-    {
-        if ((sender as FrameworkElement)?.DataContext is not ProxyEntry proxy)
-        {
-            return;
-        }
-
-        try
-        {
-            var provider = string.IsNullOrWhiteSpace(proxy.OpenedProvider)
-                ? GetSelectedBrowserProvider()
-                : proxy.OpenedProvider;
-
-            if (string.Equals(provider, "jancy", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException("Cookie clearing for Jancy profiles must be done inside Jancy. The Jancy provider owns its own cookie partitions.");
-            }
-
-            var deleted = _systemBrowserLauncher.ClearCookies(proxy, provider);
-            proxy.Status = "Cookies cleared";
-            ShowMessage(deleted == 0
-                ? $"No cookie files found for row {proxy.RowNumber}."
-                : $"Deleted {deleted} cookie file(s) for row {proxy.RowNumber}.", InfoBarSeverity.Success);
-        }
-        catch (Exception ex)
-        {
-            proxy.Status = "Cookie clear error";
-            ShowMessage(ex.Message, InfoBarSeverity.Error);
-        }
-    }
-
     private void ProxyListsView_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressStateSave)
@@ -421,18 +454,6 @@ public sealed partial class MainWindow : Window
         }
 
         CopyRecords([proxy]);
-    }
-
-    private void CopySelected_Click(object sender, RoutedEventArgs e)
-    {
-        var selected = GetSelectedProxies();
-        if (selected.Count == 0)
-        {
-            ShowMessage("Select at least one proxy to copy.", InfoBarSeverity.Warning);
-            return;
-        }
-
-        CopyRecords(selected);
     }
 
     private void CopyRecords(IReadOnlyList<ProxyEntry> records)
@@ -649,6 +670,7 @@ public sealed partial class MainWindow : Window
             foreach (var proxy in proxies)
             {
                 proxy.SourcePath = path;
+                proxy.BrowserProvider = _defaultBrowserProvider;
                 ApplySavedProxyState(proxy, savedStates);
                 list.Items.Add(proxy);
             }
@@ -688,6 +710,7 @@ public sealed partial class MainWindow : Window
         proxy.PingMs = savedState.PingMs;
         proxy.ResponseMs = savedState.ResponseMs;
         proxy.SpeedGroup = savedState.SpeedGroup;
+        proxy.BrowserProvider = savedState.BrowserProvider;
     }
 
     private void SaveState()
@@ -707,10 +730,11 @@ public sealed partial class MainWindow : Window
                 SearchText = SearchBox.Text.Trim(),
                 TargetUrl = TargetUrlBox.Text.Trim(),
                 SyncMonitorId = (SyncMonitorBox.SelectedItem as SyncMonitorOption)?.Id,
-                BrowserProvider = GetSelectedBrowserProvider(),
+                BrowserProvider = _defaultBrowserProvider,
                 JancyEndpointUrl = _jancyEndpointUrl,
                 AutoUpdateEnabled = _autoUpdateEnabled,
-                GitRepositoryPath = _gitRepositoryPath
+                GitRepositoryPath = _gitRepositoryPath,
+                LastUpdatePreviousHead = _lastUpdatePreviousHead
             });
     }
 
@@ -719,7 +743,7 @@ public sealed partial class MainWindow : Window
         var settings = _stateStore.LoadSettings();
         EnsureFavoritesList();
         SelectSyncMonitor(settings.SyncMonitorId);
-        SelectBrowserProvider(settings.BrowserProvider);
+        _defaultBrowserProvider = NormalizeBrowserProvider(settings.BrowserProvider);
         _jancyEndpointUrl = string.IsNullOrWhiteSpace(settings.JancyEndpointUrl)
             ? "http://127.0.0.1:43033"
             : settings.JancyEndpointUrl;
@@ -727,6 +751,7 @@ public sealed partial class MainWindow : Window
         _gitRepositoryPath = string.IsNullOrWhiteSpace(settings.GitRepositoryPath)
             ? GitAutoUpdater.DetectRepositoryPath()
             : settings.GitRepositoryPath;
+        _lastUpdatePreviousHead = settings.LastUpdatePreviousHead;
         SearchBox.Text = settings.SearchText;
 
         if (!string.IsNullOrWhiteSpace(settings.TargetUrl))
@@ -793,30 +818,9 @@ public sealed partial class MainWindow : Window
         SyncMonitorBox.SelectedItem = selected;
     }
 
-    private void SelectBrowserProvider(string? provider)
+    private static string NormalizeBrowserProvider(string? provider)
     {
-        var normalized = provider?.Trim().ToLowerInvariant() switch
-        {
-            "chrome" => "chrome",
-            "edge" => "edge",
-            "firefox" => "firefox",
-            _ => "jancy"
-        };
-        foreach (var item in BrowserProviderBox.Items.OfType<ComboBoxItem>())
-        {
-            if (string.Equals(item.Tag?.ToString(), normalized, StringComparison.OrdinalIgnoreCase))
-            {
-                BrowserProviderBox.SelectedItem = item;
-                return;
-            }
-        }
-
-        BrowserProviderBox.SelectedIndex = 0;
-    }
-
-    private string GetSelectedBrowserProvider()
-    {
-        return (BrowserProviderBox.SelectedItem as ComboBoxItem)?.Tag?.ToString()?.Trim().ToLowerInvariant() switch
+        return provider?.Trim().ToLowerInvariant() switch
         {
             "chrome" => "chrome",
             "edge" => "edge",
@@ -825,9 +829,9 @@ public sealed partial class MainWindow : Window
         };
     }
 
-    private bool IsJancySelected()
+    private static bool IsJancyProvider(string? provider)
     {
-        return string.Equals(GetSelectedBrowserProvider(), "jancy", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(NormalizeBrowserProvider(provider), "jancy", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string GetBrowserDisplayName(string provider)
@@ -1047,6 +1051,33 @@ public sealed partial class MainWindow : Window
         };
     }
 
+    private void AppendUpdateLog(TextBox target, string message)
+    {
+        var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
+        target.Text = string.IsNullOrWhiteSpace(target.Text) || string.Equals(target.Text, "Ready", StringComparison.OrdinalIgnoreCase)
+            ? line
+            : $"{target.Text}{Environment.NewLine}{line}";
+        target.SelectionStart = target.Text.Length;
+        LogTitleText.Text = "Update";
+        LogText.Text = line;
+        LogBorder.BorderBrush = new SolidColorBrush(ColorHelper.FromArgb(255, 13, 110, 253));
+    }
+
+    private static void SelectComboBoxValue(ComboBox comboBox, string provider)
+    {
+        var normalized = NormalizeBrowserProvider(provider);
+        foreach (var item in comboBox.Items.OfType<ComboBoxItem>())
+        {
+            if (string.Equals(item.Tag?.ToString(), normalized, StringComparison.OrdinalIgnoreCase))
+            {
+                comboBox.SelectedItem = item;
+                return;
+            }
+        }
+
+        comboBox.SelectedIndex = 0;
+    }
+
     private async void Settings_Click(object sender, RoutedEventArgs e)
     {
         var endpointBox = new TextBox
@@ -1061,16 +1092,39 @@ public sealed partial class MainWindow : Window
             Content = "Auto-update on startup through git pull --ff-only",
             IsChecked = _autoUpdateEnabled
         };
+        var defaultBrowserBox = new ComboBox
+        {
+            Header = "Default browser for new proxies",
+            SelectedValuePath = "Tag"
+        };
+        defaultBrowserBox.Items.Add(new ComboBoxItem { Content = "Jancy", Tag = "jancy" });
+        defaultBrowserBox.Items.Add(new ComboBoxItem { Content = "Chrome", Tag = "chrome" });
+        defaultBrowserBox.Items.Add(new ComboBoxItem { Content = "Edge", Tag = "edge" });
+        defaultBrowserBox.Items.Add(new ComboBoxItem { Content = "Firefox", Tag = "firefox" });
+        SelectComboBoxValue(defaultBrowserBox, _defaultBrowserProvider);
+        var repoUrlBox = new TextBox
+        {
+            Header = "Git repository URL",
+            Text = GitAutoUpdater.RepositoryUrl,
+            IsReadOnly = true
+        };
         var repoPathBox = new TextBox
         {
             Header = "Git repository path",
             Text = string.IsNullOrWhiteSpace(_gitRepositoryPath) ? GitAutoUpdater.DetectRepositoryPath() : _gitRepositoryPath
         };
         var runUpdateButton = new Button { Content = "Run git update" };
-        var statusText = new TextBlock
+        var rollbackButton = new Button { Content = "Rollback previous update" };
+        var statusText = new TextBox
         {
+            Header = "Update log",
+            IsReadOnly = true,
+            AcceptsReturn = true,
+            Height = 180,
             TextWrapping = TextWrapping.Wrap,
-            Foreground = new SolidColorBrush(ColorHelper.FromArgb(255, 142, 150, 160))
+            Text = string.IsNullOrWhiteSpace(_lastUpdatePreviousHead)
+                ? "Ready"
+                : $"Ready. Rollback target: {_lastUpdatePreviousHead[..Math.Min(7, _lastUpdatePreviousHead.Length)]}"
         };
 
         installBridgeButton.Click += (_, _) =>
@@ -1079,11 +1133,12 @@ public sealed partial class MainWindow : Window
             {
                 var bridgePath = _jancyLauncher.InstallBridge();
                 var profilePath = _jancyLauncher.ExportProfiles(GetAllLoadedProxies(), TargetUrlBox.Text.Trim());
-                statusText.Text = $"Installed: {bridgePath}\nProfiles: {profilePath}";
+                AppendUpdateLog(statusText, $"Installed Jancy bridge: {bridgePath}");
+                AppendUpdateLog(statusText, $"Exported Jancy profiles: {profilePath}");
             }
             catch (Exception ex)
             {
-                statusText.Text = ex.Message;
+                AppendUpdateLog(statusText, ex.Message);
             }
         };
 
@@ -1092,13 +1147,24 @@ public sealed partial class MainWindow : Window
             try
             {
                 runUpdateButton.IsEnabled = false;
-                statusText.Text = "Running git update...";
-                var output = await GitAutoUpdater.PullAsync(repoPathBox.Text.Trim());
-                statusText.Text = string.IsNullOrWhiteSpace(output) ? "Git update completed." : output;
+                SaveState();
+                statusText.Text = "";
+                AppendUpdateLog(statusText, "Starting git update.");
+                var result = await GitAutoUpdater.UpdateAsync(repoPathBox.Text.Trim(), line =>
+                {
+                    DispatcherQueue.TryEnqueue(() => AppendUpdateLog(statusText, line));
+                });
+                if (!string.Equals(result.PreviousHead, result.CurrentHead, StringComparison.OrdinalIgnoreCase))
+                {
+                    _lastUpdatePreviousHead = result.PreviousHead;
+                    SaveState();
+                    AppendUpdateLog(statusText, $"Rollback saved: {_lastUpdatePreviousHead[..Math.Min(7, _lastUpdatePreviousHead.Length)]}");
+                }
+                AppendUpdateLog(statusText, "Git update completed. Restart Proxy Sentry CSV to run updated binaries.");
             }
             catch (Exception ex)
             {
-                statusText.Text = ex.Message;
+                AppendUpdateLog(statusText, ex.Message);
             }
             finally
             {
@@ -1106,12 +1172,40 @@ public sealed partial class MainWindow : Window
             }
         };
 
+        rollbackButton.Click += async (_, _) =>
+        {
+            try
+            {
+                rollbackButton.IsEnabled = false;
+                SaveState();
+                AppendUpdateLog(statusText, "Starting rollback.");
+                var result = await GitAutoUpdater.RollbackAsync(repoPathBox.Text.Trim(), _lastUpdatePreviousHead, line =>
+                {
+                    DispatcherQueue.TryEnqueue(() => AppendUpdateLog(statusText, line));
+                });
+                _lastUpdatePreviousHead = result.PreviousHead;
+                SaveState();
+                AppendUpdateLog(statusText, "Rollback completed. Restart Proxy Sentry CSV to run restored binaries.");
+            }
+            catch (Exception ex)
+            {
+                AppendUpdateLog(statusText, ex.Message);
+            }
+            finally
+            {
+                rollbackButton.IsEnabled = true;
+            }
+        };
+
         var panel = new StackPanel { Spacing = 12, Width = 620 };
         panel.Children.Add(endpointBox);
         panel.Children.Add(installBridgeButton);
+        panel.Children.Add(defaultBrowserBox);
         panel.Children.Add(autoUpdateBox);
+        panel.Children.Add(repoUrlBox);
         panel.Children.Add(repoPathBox);
         panel.Children.Add(runUpdateButton);
+        panel.Children.Add(rollbackButton);
         panel.Children.Add(statusText);
 
         var dialog = new ContentDialog
@@ -1134,6 +1228,7 @@ public sealed partial class MainWindow : Window
             ? "http://127.0.0.1:43033"
             : endpointBox.Text.Trim();
         _autoUpdateEnabled = autoUpdateBox.IsChecked == true;
+        _defaultBrowserProvider = NormalizeBrowserProvider((defaultBrowserBox.SelectedItem as ComboBoxItem)?.Tag?.ToString());
         _gitRepositoryPath = repoPathBox.Text.Trim();
         SaveState();
     }
@@ -1147,10 +1242,23 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            var output = await GitAutoUpdater.PullAsync(_gitRepositoryPath);
-            if (!string.IsNullOrWhiteSpace(output) && !output.Contains("Already up to date", StringComparison.OrdinalIgnoreCase))
+            var result = await GitAutoUpdater.UpdateAsync(_gitRepositoryPath, line =>
             {
-                DispatcherQueue.TryEnqueue(() => ShowMessage($"Git auto-update completed: {output}", InfoBarSeverity.Success));
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    LogTitleText.Text = "Update";
+                    LogText.Text = $"[{DateTime.Now:HH:mm:ss}] {line}";
+                });
+            });
+
+            if (!string.Equals(result.PreviousHead, result.CurrentHead, StringComparison.OrdinalIgnoreCase))
+            {
+                _lastUpdatePreviousHead = result.PreviousHead;
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    SaveState();
+                    ShowMessage($"Git auto-update completed: {result.PreviousHead[..7]} -> {result.CurrentHead[..7]}. Restart to run updated binaries.", InfoBarSeverity.Success);
+                });
             }
         }
         catch (Exception ex)

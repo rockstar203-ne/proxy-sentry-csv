@@ -18,6 +18,7 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     private bool _copied;
     private bool _isFavorite;
     private string _displayName = "";
+    private string _browserProvider = "jancy";
 
     public int RowNumber { get; set; }
     public string Scheme { get; set; } = "http";
@@ -28,6 +29,31 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     public string RawProxy { get; set; } = "";
     public string OpenedProvider { get; set; } = "";
     public string SourcePath { get; set; } = "";
+
+    public string BrowserProvider
+    {
+        get => _browserProvider;
+        set
+        {
+            var normalized = NormalizeBrowserProvider(value);
+            if (_browserProvider == normalized)
+            {
+                return;
+            }
+
+            _browserProvider = normalized;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(BrowserDisplayName));
+        }
+    }
+
+    public string BrowserDisplayName => BrowserProvider switch
+    {
+        "chrome" => "Chrome",
+        "edge" => "Edge",
+        "firefox" => "Firefox",
+        _ => "Jancy"
+    };
 
     public string NormalizedProxy => $"{Scheme.ToLowerInvariant()}://{Username}:{Password}@{Host.ToLowerInvariant()}:{Port}";
 
@@ -261,5 +287,16 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+
+    private static string NormalizeBrowserProvider(string? provider)
+    {
+        return provider?.Trim().ToLowerInvariant() switch
+        {
+            "chrome" => "chrome",
+            "edge" => "edge",
+            "firefox" => "firefox",
+            _ => "jancy"
+        };
     }
 }

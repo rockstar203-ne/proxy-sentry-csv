@@ -154,40 +154,6 @@ public sealed class SystemBrowserLauncher : IDisposable
         }
     }
 
-    public int ClearCookies(ProxyEntry proxy, string provider)
-    {
-        var normalizedProvider = NormalizeProvider(provider);
-        if (!IsSystemBrowser(normalizedProvider))
-        {
-            throw new InvalidOperationException("Cookie clearing is available for Chrome, Edge, and Firefox app-managed profiles.");
-        }
-
-        var profilePath = GetProfilePath(normalizedProvider, proxy);
-        if (!Directory.Exists(profilePath))
-        {
-            return 0;
-        }
-
-        var deleted = 0;
-        foreach (var pattern in GetCookieFilePatterns(normalizedProvider))
-        {
-            foreach (var file in Directory.EnumerateFiles(profilePath, pattern, SearchOption.AllDirectories))
-            {
-                try
-                {
-                    File.Delete(file);
-                    deleted++;
-                }
-                catch
-                {
-                    // Locked cookie databases are skipped; closing the browser and retrying will remove them.
-                }
-            }
-        }
-
-        return deleted;
-    }
-
     private static void AddChromiumArguments(ProcessStartInfo startInfo, string profilePath, string targetUrl, int relayPort)
     {
         startInfo.ArgumentList.Add("--new-window");
@@ -220,16 +186,6 @@ public sealed class SystemBrowserLauncher : IDisposable
     private string GetProfilePath(string provider, ProxyEntry proxy)
     {
         return Path.Combine(_profilesRoot, provider, $"proxy-{proxy.ProfileKey}");
-    }
-
-    private static IEnumerable<string> GetCookieFilePatterns(string provider)
-    {
-        if (provider == "firefox")
-        {
-            return ["cookies.sqlite", "cookies.sqlite-*", "webappsstore.sqlite", "webappsstore.sqlite-*"];
-        }
-
-        return ["Cookies", "Cookies-journal", "Network Persistent State"];
     }
 
     private static string ResolveBrowserExecutable(string provider)

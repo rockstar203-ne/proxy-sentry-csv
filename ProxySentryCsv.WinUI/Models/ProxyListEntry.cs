@@ -18,6 +18,7 @@ public sealed class ProxyListEntry : INotifyPropertyChanged
     public string Name { get; }
     public string? Path { get; }
     public bool IsFavorites { get; }
+    public bool IsRemovable => !IsFavorites;
     public ObservableCollection<ProxyEntry> Items { get; } = [];
     public int Count => Items.Count;
     public string CountText => IsFavorites ? $"{Count} saved" : $"{Count} proxies";

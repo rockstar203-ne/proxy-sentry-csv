@@ -5,7 +5,7 @@ Portable layout:
   components\
   Data\
 
-Proxy Sentry CSV loads proxy CSV files, keeps row state, copies and exports proxies, checks ping/response speed, and opens selected proxies through a browser provider.
+Proxy Sentry CSV loads proxy CSV files, removes added lists, keeps row state, copies and exports proxies, checks ping/response speed, and opens each proxy through its own browser provider.
 
 Browser providers:
   Jancy
@@ -26,4 +26,12 @@ Jancy setup:
 Selection and sync:
   Select rows in the table with the standard Windows list behavior.
   Use Ctrl or Shift for multi-select.
-  Open sync group, Start sync, and Stop sync apply to selected Jancy controlled windows.
+  Open sync group, Start sync, Stop sync, and Align selected apply to selected Jancy controlled windows.
+  Sync includes navigation, mouse movement, clicks, wheel, scroll, text input, and keyboard input.
+
+Updates:
+  Settings uses the built-in repository URL:
+    https://github.com/rockstar203-ne/proxy-sentry-csv.git
+  Run git update writes a step-by-step log and saves the previous commit for rollback.
+  Rollback previous update resets the git repository to that saved commit.
+  Data\ keeps app state and is not reset by update or rollback.
