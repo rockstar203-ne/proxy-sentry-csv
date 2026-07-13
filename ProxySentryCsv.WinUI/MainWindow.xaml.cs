@@ -6,6 +6,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.UI;
 using Windows.ApplicationModel.DataTransfer;
@@ -20,6 +21,7 @@ public sealed partial class MainWindow : Window
     private readonly AppStateStore _stateStore;
     private readonly SystemBrowserLauncher _systemBrowserLauncher;
     private readonly JancyLauncher _jancyLauncher;
+    private readonly BrowserForgeFingerprintService _browserForgeFingerprints;
     private readonly ProxySpeedChecker _proxySpeedChecker = new();
     private AppWindow? _appWindow;
     private ProxyListEntry? _activeList;
@@ -40,7 +42,8 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         _stateStore = new AppStateStore(_appDataPath);
-        _systemBrowserLauncher = new SystemBrowserLauncher(_appDataPath);
+        _browserForgeFingerprints = new BrowserForgeFingerprintService(_appDataPath);
+        _systemBrowserLauncher = new SystemBrowserLauncher(_appDataPath, _browserForgeFingerprints);
         _jancyLauncher = new JancyLauncher(_appDataPath);
         _systemBrowserLauncher.ProfilesClosed += SystemBrowserLauncher_ProfilesClosed;
         InitializeWindowChrome();
@@ -315,16 +318,25 @@ public sealed partial class MainWindow : Window
         SaveState();
     }
 
-    private async void RemoveList_Click(object sender, RoutedEventArgs e)
+    private void ProxyListItem_RightTapped(object sender, RightTappedRoutedEventArgs e)
     {
-        await RemoveProxyListAsync(_activeList);
-    }
-
-    private async void RemoveListItem_Click(object sender, RoutedEventArgs e)
-    {
-        if ((sender as FrameworkElement)?.DataContext is ProxyListEntry list)
+        if ((sender as FrameworkElement)?.DataContext is not ProxyListEntry list)
         {
-            await RemoveProxyListAsync(list);
+            return;
+        }
+
+        var deleteItem = new MenuFlyoutItem
+        {
+            Text = list.IsFavorites ? "Favorites cannot be deleted" : "Delete list",
+            IsEnabled = list.IsRemovable
+        };
+        deleteItem.Click += async (_, _) => await RemoveProxyListAsync(list);
+
+        var flyout = new MenuFlyout();
+        flyout.Items.Add(deleteItem);
+        if (sender is FrameworkElement element)
+        {
+            flyout.ShowAt(element, e.GetPosition(element));
         }
     }
 

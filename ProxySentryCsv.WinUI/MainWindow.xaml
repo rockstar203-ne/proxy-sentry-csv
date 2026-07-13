@@ -25,7 +25,6 @@
             <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <Button x:Name="OpenCsvButton" Click="OpenCsv_Click" Content="Open CSV" />
-                    <Button x:Name="RemoveListButton" Click="RemoveList_Click" Content="Remove list" />
                     <Button x:Name="ExportAdsButton" Click="ExportAds_Click" Content="Export ADS" />
                     <Button x:Name="ExportTxtButton" Click="ExportTxt_Click" Content="Export TXT" />
                     <Button x:Name="CheckAllButton" Click="CheckAll_Click" Content="Check all" />
@@ -102,19 +101,19 @@
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock FontWeight="SemiBold" Text="Lists" />
                             <TextBlock Grid.Column="1" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Count" />
-                            <TextBlock Grid.Column="2" Width="72" />
                         </Grid>
                     </ListView.Header>
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="models:ProxyListEntry">
-                            <Grid Padding="12,8" ColumnSpacing="8">
+                            <Grid
+                                Padding="12,8"
+                                ColumnSpacing="8"
+                                RightTapped="ProxyListItem_RightTapped">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
@@ -122,12 +121,6 @@
                                     Grid.Column="1"
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                     Text="{Binding Count}" />
-                                <Button
-                                    Grid.Column="2"
-                                    MinWidth="64"
-                                    Click="RemoveListItem_Click"
-                                    Content="Remove"
-                                    IsEnabled="{Binding IsRemovable}" />
                             </Grid>
                         </DataTemplate>
                     </ListView.ItemTemplate>

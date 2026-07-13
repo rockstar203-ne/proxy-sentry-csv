@@ -8,12 +8,14 @@ namespace ProxySentryCsv.Services;
 public sealed class SystemBrowserLauncher : IDisposable
 {
     private readonly string _profilesRoot;
+    private readonly BrowserForgeFingerprintService _fingerprints;
     private readonly object _gate = new();
     private readonly Dictionary<string, TrackedBrowser> _running = new(StringComparer.OrdinalIgnoreCase);
 
-    public SystemBrowserLauncher(string appDataPath)
+    public SystemBrowserLauncher(string appDataPath, BrowserForgeFingerprintService fingerprints)
     {
         _profilesRoot = Path.Combine(appDataPath, "SystemBrowserProfiles");
+        _fingerprints = fingerprints;
     }
 
     public event Action<IReadOnlyList<string>>? ProfilesClosed;
@@ -23,7 +25,7 @@ public sealed class SystemBrowserLauncher : IDisposable
         return NormalizeProvider(provider) is "chrome" or "edge" or "firefox";
     }
 
-    public Task LaunchAsync(ProxyEntry proxy, string targetUrl, string provider, Action<string>? progress = null)
+    public async Task LaunchAsync(ProxyEntry proxy, string targetUrl, string provider, Action<string>? progress = null)
     {
         var normalizedProvider = NormalizeProvider(provider);
         if (!IsSystemBrowser(normalizedProvider))
@@ -33,6 +35,8 @@ public sealed class SystemBrowserLauncher : IDisposable
 
         Close(proxy);
         var executablePath = ResolveBrowserExecutable(normalizedProvider);
+        var browserMajor = GetBrowserMajorVersion(executablePath);
+        var fingerprint = await _fingerprints.GetOrCreateAsync(proxy, normalizedProvider, browserMajor, progress);
         var profilePath = GetProfilePath(normalizedProvider, proxy);
         Directory.CreateDirectory(profilePath);
         progress?.Invoke("Starting proxy relay");
@@ -47,14 +51,19 @@ public sealed class SystemBrowserLauncher : IDisposable
                 WorkingDirectory = Path.GetDirectoryName(executablePath) ?? AppContext.BaseDirectory,
                 UseShellExecute = false
             };
+            if (!string.IsNullOrWhiteSpace(fingerprint.TimeZone))
+            {
+                startInfo.Environment["TZ"] = fingerprint.TimeZone;
+            }
 
             if (normalizedProvider is "chrome" or "edge")
             {
-                AddChromiumArguments(startInfo, profilePath, targetUrl, relay.Port);
+                var extensionPath = WriteChromiumBrowserForgeExtension(profilePath, fingerprint);
+                AddChromiumArguments(startInfo, profilePath, targetUrl, relay.Port, fingerprint, extensionPath, normalizedProvider);
             }
             else
             {
-                WriteFirefoxProfile(profilePath, relay.Port);
+                WriteFirefoxProfile(profilePath, relay.Port, fingerprint);
                 startInfo.ArgumentList.Add("-no-remote");
                 startInfo.ArgumentList.Add("-profile");
                 startInfo.ArgumentList.Add(profilePath);
@@ -79,7 +88,6 @@ public sealed class SystemBrowserLauncher : IDisposable
             throw;
         }
 
-        return Task.CompletedTask;
     }
 
     public void Close(ProxyEntry proxy)
@@ -154,19 +162,46 @@ public sealed class SystemBrowserLauncher : IDisposable
         }
     }
 
-    private static void AddChromiumArguments(ProcessStartInfo startInfo, string profilePath, string targetUrl, int relayPort)
+    private static void AddChromiumArguments(
+        ProcessStartInfo startInfo,
+        string profilePath,
+        string targetUrl,
+        int relayPort,
+        BrowserForgeFingerprint fingerprint,
+        string extensionPath,
+        string provider)
     {
         startInfo.ArgumentList.Add("--new-window");
         startInfo.ArgumentList.Add($"--user-data-dir={profilePath}");
         startInfo.ArgumentList.Add("--no-first-run");
         startInfo.ArgumentList.Add("--no-default-browser-check");
         startInfo.ArgumentList.Add("--disable-session-crashed-bubble");
+        startInfo.ArgumentList.Add("--disable-quic");
+        startInfo.ArgumentList.Add("--disable-background-networking");
+        startInfo.ArgumentList.Add("--disable-preconnect");
+        startInfo.ArgumentList.Add("--dns-prefetch-disable");
+        startInfo.ArgumentList.Add("--disable-features=UseDnsHttpsSvcb,UseDnsHttpsSvcbAlpn,DnsOverHttps,msEdgeStartupBoost,StartupBoost,EdgeStartupBoost");
+        startInfo.ArgumentList.Add($"--user-agent={fingerprint.UserAgent}");
+        startInfo.ArgumentList.Add($"--lang={NormalizePrimaryLocale(fingerprint.Locale)}");
         startInfo.ArgumentList.Add($"--proxy-server=http://127.0.0.1:{relayPort}");
         startInfo.ArgumentList.Add("--proxy-bypass-list=<-loopback>");
+        if (provider == "edge")
+        {
+            startInfo.ArgumentList.Add("--edge-skip-compat-layer-relaunch");
+        }
+        if (fingerprint.Screen.Width is > 0 && fingerprint.Screen.Height is > 0)
+        {
+            startInfo.ArgumentList.Add($"--window-size={fingerprint.Screen.Width.Value},{fingerprint.Screen.Height.Value}");
+        }
+        if (Directory.Exists(extensionPath))
+        {
+            startInfo.ArgumentList.Add($"--disable-extensions-except={extensionPath}");
+            startInfo.ArgumentList.Add($"--load-extension={extensionPath}");
+        }
         startInfo.ArgumentList.Add(targetUrl);
     }
 
-    private static void WriteFirefoxProfile(string profilePath, int relayPort)
+    private static void WriteFirefoxProfile(string profilePath, int relayPort, BrowserForgeFingerprint fingerprint)
     {
         var prefs = new StringBuilder();
         prefs.AppendLine("user_pref(\"network.proxy.type\", 1);");
@@ -177,10 +212,109 @@ public sealed class SystemBrowserLauncher : IDisposable
         prefs.AppendLine($"user_pref(\"network.proxy.http_port\", {relayPort});");
         prefs.AppendLine($"user_pref(\"network.proxy.ssl\", {Json("127.0.0.1")});");
         prefs.AppendLine($"user_pref(\"network.proxy.ssl_port\", {relayPort});");
+        prefs.AppendLine($"user_pref(\"general.useragent.override\", {Json(fingerprint.UserAgent)});");
+        prefs.AppendLine($"user_pref(\"intl.accept_languages\", {Json(ToFirefoxAcceptLanguages(fingerprint))});");
+        prefs.AppendLine($"user_pref(\"javascript.use_us_english_locale\", false);");
+        prefs.AppendLine($"user_pref(\"privacy.resistFingerprinting\", false);");
+        prefs.AppendLine($"user_pref(\"dom.webdriver.enabled\", false);");
 
         var prefsText = prefs.ToString();
         File.WriteAllText(Path.Combine(profilePath, "user.js"), prefsText, Encoding.UTF8);
         File.WriteAllText(Path.Combine(profilePath, "prefs.js"), prefsText, Encoding.UTF8);
+    }
+
+    private static string WriteChromiumBrowserForgeExtension(string profilePath, BrowserForgeFingerprint fingerprint)
+    {
+        var extensionPath = Path.Combine(profilePath, "ProxySentryBrowserForgeExtension");
+        Directory.CreateDirectory(extensionPath);
+        File.WriteAllText(Path.Combine(extensionPath, "manifest.json"), """
+{
+  "manifest_version": 3,
+  "name": "Proxy Sentry BrowserForge",
+  "version": "1.0.0",
+  "description": "Applies Proxy Sentry CSV BrowserForge profile values.",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}
+""", Encoding.UTF8);
+
+        var payload = JsonSerializer.Serialize(fingerprint);
+        var script = $$"""
+(() => {
+  const fp = {{payload}};
+  const source = `(${function applyBrowserForgeFingerprint(fp) {
+    const defineGetter = (target, name, value) => {
+      try {
+        Object.defineProperty(target, name, { get: () => value, configurable: true });
+      } catch (_) {}
+    };
+
+    const nav = Navigator.prototype;
+    defineGetter(nav, "userAgent", fp.userAgent || fp.UserAgent || "");
+    defineGetter(nav, "platform", fp.platform || fp.Platform || "Win32");
+    defineGetter(nav, "vendor", fp.vendor || fp.Vendor || "");
+    defineGetter(nav, "language", fp.locale || fp.Locale || "en-US");
+    defineGetter(nav, "languages", fp.languages || fp.Languages || ["en-US", "en"]);
+    defineGetter(nav, "webdriver", false);
+    if ((fp.hardwareConcurrency || fp.HardwareConcurrency) !== null && (fp.hardwareConcurrency || fp.HardwareConcurrency) !== undefined) {
+      defineGetter(nav, "hardwareConcurrency", fp.hardwareConcurrency || fp.HardwareConcurrency);
+    }
+    if ((fp.deviceMemory || fp.DeviceMemory) !== null && (fp.deviceMemory || fp.DeviceMemory) !== undefined) {
+      defineGetter(nav, "deviceMemory", fp.deviceMemory || fp.DeviceMemory);
+    }
+    if ((fp.maxTouchPoints || fp.MaxTouchPoints) !== null && (fp.maxTouchPoints || fp.MaxTouchPoints) !== undefined) {
+      defineGetter(nav, "maxTouchPoints", fp.maxTouchPoints || fp.MaxTouchPoints);
+    }
+
+    const screenData = fp.screen || fp.Screen || {};
+    const screenMap = {
+      width: screenData.width || screenData.Width,
+      height: screenData.height || screenData.Height,
+      availWidth: screenData.availWidth || screenData.AvailWidth,
+      availHeight: screenData.availHeight || screenData.AvailHeight,
+      availLeft: screenData.availLeft || screenData.AvailLeft || 0,
+      availTop: screenData.availTop || screenData.AvailTop || 0,
+      colorDepth: screenData.colorDepth || screenData.ColorDepth,
+      pixelDepth: screenData.pixelDepth || screenData.PixelDepth
+    };
+    for (const [key, value] of Object.entries(screenMap)) {
+      if (value !== null && value !== undefined) {
+        defineGetter(Screen.prototype, key, value);
+      }
+    }
+    const dpr = screenData.devicePixelRatio || screenData.DevicePixelRatio;
+    if (dpr !== null && dpr !== undefined) {
+      defineGetter(window, "devicePixelRatio", dpr);
+    }
+
+    const timeZone = fp.timeZone || fp.TimeZone;
+    if (timeZone && Intl && Intl.DateTimeFormat) {
+      const original = Intl.DateTimeFormat.prototype.resolvedOptions;
+      Intl.DateTimeFormat.prototype.resolvedOptions = function() {
+        const options = original.call(this);
+        options.timeZone = timeZone;
+        return options;
+      };
+    }
+  }.toString()})(${JSON.stringify(fp)});`;
+
+  const element = document.documentElement || document.head || document.body;
+  const script = document.createElement("script");
+  script.textContent = source;
+  if (element) {
+    element.appendChild(script);
+    script.remove();
+  }
+})();
+""";
+        File.WriteAllText(Path.Combine(extensionPath, "inject.js"), script, Encoding.UTF8);
+        return extensionPath;
     }
 
     private string GetProfilePath(string provider, ProxyEntry proxy)
@@ -212,6 +346,23 @@ public sealed class SystemBrowserLauncher : IDisposable
         }
 
         throw new InvalidOperationException($"{GetBrowserDisplayName(provider)} was not found in Windows. Install it or add it to PATH.");
+    }
+
+    private static int? GetBrowserMajorVersion(string executablePath)
+    {
+        try
+        {
+            var version = FileVersionInfo.GetVersionInfo(executablePath);
+            var raw = !string.IsNullOrWhiteSpace(version.ProductVersion)
+                ? version.ProductVersion
+                : version.FileVersion;
+            var first = raw?.Split(['.', ' '], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+            return int.TryParse(first, out var major) && major > 0 ? major : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static IEnumerable<string> GetBrowserCandidates(string provider)
@@ -295,6 +446,25 @@ public sealed class SystemBrowserLauncher : IDisposable
     private static string Json(string value)
     {
         return JsonSerializer.Serialize(value);
+    }
+
+    private static string NormalizePrimaryLocale(string? locale)
+    {
+        return string.IsNullOrWhiteSpace(locale) ? "en-US" : locale.Trim();
+    }
+
+    private static string ToFirefoxAcceptLanguages(BrowserForgeFingerprint fingerprint)
+    {
+        if (fingerprint.Languages.Length > 0)
+        {
+            return string.Join(",", fingerprint.Languages.Where(language => !string.IsNullOrWhiteSpace(language)).Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
+        var locale = NormalizePrimaryLocale(fingerprint.Locale);
+        var language = locale.Split('-')[0];
+        return string.Equals(locale, language, StringComparison.OrdinalIgnoreCase)
+            ? locale
+            : $"{locale},{language},en";
     }
 
     private void MarkClosed(string stableId)

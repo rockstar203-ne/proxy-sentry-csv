@@ -17,6 +17,9 @@ Browser providers:
     Each proxy gets a separate app-managed profile under Data\SystemBrowserProfiles\.
     The app starts a local no-auth proxy relay on 127.0.0.1 and forwards traffic to the upstream proxy with Proxy-Authorization.
     This avoids native browser username/password prompts in Chrome, Edge, and Firefox.
+    If Python browserforge is available, Proxy Sentry CSV detects the proxy exit country through the proxy and creates a matching BrowserForge profile.
+    Example: a US proxy gets en-US language, US timezone, and a browser-specific UA/fingerprint.
+    If BrowserForge is unavailable, the browser still opens with a local fallback profile based on the detected proxy country.
 
 Jancy setup:
   Open Settings in Proxy Sentry CSV.
