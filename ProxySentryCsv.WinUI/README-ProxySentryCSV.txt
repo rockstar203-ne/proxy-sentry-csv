@@ -19,6 +19,8 @@ Browser providers:
     This avoids native browser username/password prompts in Chrome, Edge, and Firefox.
     If Python browserforge is available, Proxy Sentry CSV detects the proxy exit country through the proxy and creates a matching BrowserForge profile.
     Example: a US proxy gets en-US language, US timezone, and a browser-specific UA/fingerprint.
+    Chrome and Edge also get extension-based timezone offset, Intl locale, navigator, screen, and WebRTC leak controls.
+    Firefox uses profile-level proxy, DNS, WebRTC, locale, and UA preferences; stock Firefox limits arbitrary timezone JavaScript spoofing compared with Chromium.
     If BrowserForge is unavailable, the browser still opens with a local fallback profile based on the detected proxy country.
 
 Jancy setup:

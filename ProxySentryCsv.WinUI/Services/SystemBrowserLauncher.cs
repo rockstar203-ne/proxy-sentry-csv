@@ -177,12 +177,15 @@ public sealed class SystemBrowserLauncher : IDisposable
         startInfo.ArgumentList.Add("--no-default-browser-check");
         startInfo.ArgumentList.Add("--disable-session-crashed-bubble");
         startInfo.ArgumentList.Add("--disable-quic");
+        startInfo.ArgumentList.Add("--disable-async-dns");
         startInfo.ArgumentList.Add("--disable-background-networking");
         startInfo.ArgumentList.Add("--disable-preconnect");
         startInfo.ArgumentList.Add("--dns-prefetch-disable");
         startInfo.ArgumentList.Add("--disable-features=UseDnsHttpsSvcb,UseDnsHttpsSvcbAlpn,DnsOverHttps,msEdgeStartupBoost,StartupBoost,EdgeStartupBoost");
+        startInfo.ArgumentList.Add("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
         startInfo.ArgumentList.Add($"--user-agent={fingerprint.UserAgent}");
         startInfo.ArgumentList.Add($"--lang={NormalizePrimaryLocale(fingerprint.Locale)}");
+        startInfo.ArgumentList.Add($"--accept-lang={ToChromiumAcceptLanguage(fingerprint)}");
         startInfo.ArgumentList.Add($"--proxy-server=http://127.0.0.1:{relayPort}");
         startInfo.ArgumentList.Add("--proxy-bypass-list=<-loopback>");
         if (provider == "edge")
@@ -208,12 +211,24 @@ public sealed class SystemBrowserLauncher : IDisposable
         prefs.AppendLine("user_pref(\"network.proxy.no_proxies_on\", \"\");");
         prefs.AppendLine("user_pref(\"network.proxy.share_proxy_settings\", false);");
         prefs.AppendLine("user_pref(\"signon.autologin.proxy\", true);");
+        prefs.AppendLine("user_pref(\"network.trr.mode\", 5);");
+        prefs.AppendLine("user_pref(\"network.dns.disablePrefetch\", true);");
+        prefs.AppendLine("user_pref(\"network.dns.disablePrefetchFromHTTPS\", true);");
+        prefs.AppendLine("user_pref(\"network.predictor.enabled\", false);");
+        prefs.AppendLine("user_pref(\"network.http.speculative-parallel-limit\", 0);");
+        prefs.AppendLine("user_pref(\"browser.fixup.dns_first_for_single_words\", false);");
+        prefs.AppendLine("user_pref(\"media.peerconnection.enabled\", false);");
+        prefs.AppendLine("user_pref(\"media.peerconnection.ice.proxy_only_if_behind_proxy\", true);");
+        prefs.AppendLine("user_pref(\"media.peerconnection.ice.default_address_only\", true);");
+        prefs.AppendLine("user_pref(\"media.peerconnection.ice.no_host\", true);");
         prefs.AppendLine($"user_pref(\"network.proxy.http\", {Json("127.0.0.1")});");
         prefs.AppendLine($"user_pref(\"network.proxy.http_port\", {relayPort});");
         prefs.AppendLine($"user_pref(\"network.proxy.ssl\", {Json("127.0.0.1")});");
         prefs.AppendLine($"user_pref(\"network.proxy.ssl_port\", {relayPort});");
         prefs.AppendLine($"user_pref(\"general.useragent.override\", {Json(fingerprint.UserAgent)});");
         prefs.AppendLine($"user_pref(\"intl.accept_languages\", {Json(ToFirefoxAcceptLanguages(fingerprint))});");
+        prefs.AppendLine($"user_pref(\"intl.locale.requested\", {Json(NormalizePrimaryLocale(fingerprint.Locale))});");
+        prefs.AppendLine("user_pref(\"intl.regional_prefs.use_os_locales\", false);");
         prefs.AppendLine($"user_pref(\"javascript.use_us_english_locale\", false);");
         prefs.AppendLine($"user_pref(\"privacy.resistFingerprinting\", false);");
         prefs.AppendLine($"user_pref(\"dom.webdriver.enabled\", false);");
@@ -233,14 +248,26 @@ public sealed class SystemBrowserLauncher : IDisposable
   "name": "Proxy Sentry BrowserForge",
   "version": "1.0.0",
   "description": "Applies Proxy Sentry CSV BrowserForge profile values.",
+  "permissions": ["privacy"],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
       "js": ["inject.js"],
       "run_at": "document_start",
-      "all_frames": true
+      "all_frames": true,
+      "world": "MAIN"
     }
   ]
+}
+""", Encoding.UTF8);
+        File.WriteAllText(Path.Combine(extensionPath, "background.js"), """
+try {
+  chrome.privacy.network.webRTCIPHandlingPolicy.set({ value: "disable_non_proxied_udp" });
+  chrome.privacy.network.networkPredictionEnabled.set({ value: false });
+} catch (_) {
 }
 """, Encoding.UTF8);
 
@@ -248,19 +275,23 @@ public sealed class SystemBrowserLauncher : IDisposable
         var script = $$"""
 (() => {
   const fp = {{payload}};
-  const source = `(${function applyBrowserForgeFingerprint(fp) {
+  const applyBrowserForgeFingerprint = function(fp) {
     const defineGetter = (target, name, value) => {
       try {
         Object.defineProperty(target, name, { get: () => value, configurable: true });
       } catch (_) {}
     };
 
+    const locale = fp.locale || fp.Locale || "en-US";
+    const languages = fp.languages || fp.Languages || [locale, locale.split("-")[0]];
+    const timeZone = fp.timeZone || fp.TimeZone || "America/New_York";
+
     const nav = Navigator.prototype;
     defineGetter(nav, "userAgent", fp.userAgent || fp.UserAgent || "");
     defineGetter(nav, "platform", fp.platform || fp.Platform || "Win32");
     defineGetter(nav, "vendor", fp.vendor || fp.Vendor || "");
-    defineGetter(nav, "language", fp.locale || fp.Locale || "en-US");
-    defineGetter(nav, "languages", fp.languages || fp.Languages || ["en-US", "en"]);
+    defineGetter(nav, "language", locale);
+    defineGetter(nav, "languages", languages);
     defineGetter(nav, "webdriver", false);
     if ((fp.hardwareConcurrency || fp.HardwareConcurrency) !== null && (fp.hardwareConcurrency || fp.HardwareConcurrency) !== undefined) {
       defineGetter(nav, "hardwareConcurrency", fp.hardwareConcurrency || fp.HardwareConcurrency);
@@ -293,23 +324,149 @@ public sealed class SystemBrowserLauncher : IDisposable
       defineGetter(window, "devicePixelRatio", dpr);
     }
 
-    const timeZone = fp.timeZone || fp.TimeZone;
-    if (timeZone && Intl && Intl.DateTimeFormat) {
-      const original = Intl.DateTimeFormat.prototype.resolvedOptions;
-      Intl.DateTimeFormat.prototype.resolvedOptions = function() {
-        const options = original.call(this);
-        options.timeZone = timeZone;
-        return options;
-      };
-    }
-  }.toString()})(${JSON.stringify(fp)});`;
+    const nativeDateTimeFormat = Intl && Intl.DateTimeFormat;
+    const nativeDate = Date;
+    const getPartsOffset = (date) => {
+      try {
+        const parts = new nativeDateTimeFormat("en-US", {
+          timeZone,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false
+        }).formatToParts(date).reduce((acc, part) => {
+          if (part.type !== "literal") {
+            acc[part.type] = part.value;
+          }
+          return acc;
+        }, {});
+        const hour = Number(parts.hour === "24" ? "0" : parts.hour);
+        const asUtc = nativeDate.UTC(
+          Number(parts.year),
+          Number(parts.month) - 1,
+          Number(parts.day),
+          hour,
+          Number(parts.minute),
+          Number(parts.second)
+        );
+        return Math.round((date.getTime() - asUtc) / 60000);
+      } catch (_) {
+        return nativeDate.prototype.getTimezoneOffset.call(date);
+      }
+    };
 
-  const element = document.documentElement || document.head || document.body;
-  const script = document.createElement("script");
-  script.textContent = source;
-  if (element) {
-    element.appendChild(script);
-    script.remove();
+    try {
+      Object.defineProperty(nativeDate.prototype, "getTimezoneOffset", {
+        value: function() {
+          return getPartsOffset(this);
+        },
+        configurable: true
+      });
+    } catch (_) {}
+
+    const patchResolvedOptions = (ctor, patcher) => {
+      try {
+        const original = ctor.prototype.resolvedOptions;
+        Object.defineProperty(ctor.prototype, "resolvedOptions", {
+          value: function() {
+            const options = original.call(this);
+            options.locale = locale;
+            patcher(options);
+            return options;
+          },
+          configurable: true
+        });
+      } catch (_) {}
+    };
+
+    const wrapIntl = (name, defaults) => {
+      try {
+        const Original = Intl[name];
+        const Wrapped = function(locales, options) {
+          const nextLocales = locales === undefined ? locale : locales;
+          const nextOptions = Object.assign({}, options || {}, defaults || {});
+          return Reflect.construct(Original, [nextLocales, nextOptions], new.target || Original);
+        };
+        Object.setPrototypeOf(Wrapped, Original);
+        Wrapped.prototype = Original.prototype;
+        Object.defineProperty(Intl, name, { value: Wrapped, configurable: true, writable: true });
+      } catch (_) {}
+    };
+
+    if (Intl) {
+      wrapIntl("DateTimeFormat", { timeZone });
+      wrapIntl("NumberFormat");
+      wrapIntl("Collator");
+      wrapIntl("PluralRules");
+      wrapIntl("RelativeTimeFormat");
+      wrapIntl("ListFormat");
+      wrapIntl("DisplayNames");
+
+      if (Intl.DateTimeFormat) {
+        patchResolvedOptions(Intl.DateTimeFormat, options => { options.timeZone = timeZone; });
+      }
+      for (const name of ["NumberFormat", "Collator", "PluralRules", "RelativeTimeFormat", "ListFormat", "DisplayNames"]) {
+        if (Intl[name]) {
+          patchResolvedOptions(Intl[name], () => {});
+        }
+      }
+    }
+
+    const blockRtc = () => {
+      for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection"]) {
+        const NativeRtc = window[name];
+        if (!NativeRtc) {
+          continue;
+        }
+        const WrappedRtc = function(configuration, constraints) {
+          const nextConfig = Object.assign({}, configuration || {}, { iceTransportPolicy: "relay" });
+          return new NativeRtc(nextConfig, constraints);
+        };
+        Object.setPrototypeOf(WrappedRtc, NativeRtc);
+        WrappedRtc.prototype = NativeRtc.prototype;
+        try {
+          Object.defineProperty(window, name, { value: WrappedRtc, configurable: true, writable: true });
+        } catch (_) {}
+      }
+    };
+    blockRtc();
+
+    let userAgentData = null;
+    try {
+      userAgentData = navigator.userAgentData;
+    } catch (_) {}
+    if (userAgentData) {
+      const browser = fp.browser || fp.Browser || "chrome";
+      const brand = browser === "edge" ? "Microsoft Edge" : browser === "firefox" ? "Firefox" : "Google Chrome";
+      const uaPrototype = Object.getPrototypeOf(userAgentData);
+      if (uaPrototype) {
+        defineGetter(uaPrototype, "platform", "Windows");
+        defineGetter(uaPrototype, "mobile", false);
+        defineGetter(uaPrototype, "brands", [
+          { brand, version: (fp.userAgent || fp.UserAgent || "").match(/(?:Chrome|Firefox|Edg)\/(\d+)/)?.[1] || "120" },
+          { brand: "Chromium", version: (fp.userAgent || fp.UserAgent || "").match(/Chrome\/(\d+)/)?.[1] || "120" }
+        ]);
+      }
+    }
+  };
+
+  try {
+    applyBrowserForgeFingerprint(fp);
+  } catch (_) {}
+
+  const source = `(${applyBrowserForgeFingerprint.toString()})(${JSON.stringify(fp)});`;
+  try {
+    const element = document.documentElement || document.head || document.body;
+    const script = document.createElement("script");
+    script.textContent = source;
+    if (element) {
+      element.appendChild(script);
+      script.remove();
+    }
+  } catch (_) {
   }
 })();
 """;
@@ -451,6 +608,27 @@ public sealed class SystemBrowserLauncher : IDisposable
     private static string NormalizePrimaryLocale(string? locale)
     {
         return string.IsNullOrWhiteSpace(locale) ? "en-US" : locale.Trim();
+    }
+
+    private static string ToChromiumAcceptLanguage(BrowserForgeFingerprint fingerprint)
+    {
+        var languages = fingerprint.Languages
+            .Where(language => !string.IsNullOrWhiteSpace(language))
+            .Select(language => language.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (languages.Count == 0)
+        {
+            var locale = NormalizePrimaryLocale(fingerprint.Locale);
+            languages.Add(locale);
+            var language = locale.Split('-')[0];
+            if (!string.Equals(locale, language, StringComparison.OrdinalIgnoreCase))
+            {
+                languages.Add(language);
+            }
+        }
+
+        return string.Join(",", languages);
     }
 
     private static string ToFirefoxAcceptLanguages(BrowserForgeFingerprint fingerprint)
