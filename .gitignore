@@ -3,8 +3,8 @@ obj/
 .vs/
 .vscode/
 release/
+release-next/
 *.user
 *.suo
 *.userosscache
 *.sln.docstates
-

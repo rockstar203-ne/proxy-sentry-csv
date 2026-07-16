@@ -17,8 +17,12 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     private bool _isOpen;
     private bool _copied;
     private bool _isFavorite;
+    private bool _syncSelected;
     private string _displayName = "";
-    private string _browserProvider = "jancy";
+    private string _browserProvider = "chrome";
+    private string _countryCode = "";
+    private string _region = "";
+    private string _city = "";
 
     public int RowNumber { get; set; }
     public string Scheme { get; set; } = "http";
@@ -29,6 +33,7 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     public string RawProxy { get; set; } = "";
     public string OpenedProvider { get; set; } = "";
     public string SourcePath { get; set; } = "";
+    public bool BrowserProviderFromCsv { get; set; }
 
     public string BrowserProvider
     {
@@ -77,9 +82,78 @@ public sealed class ProxyEntry : INotifyPropertyChanged
         }
     }
 
+    public string ProxyDisplay => string.IsNullOrWhiteSpace(Host) ? "-" : Host;
+
     public string StandardProxy => string.IsNullOrWhiteSpace(Username) || string.IsNullOrWhiteSpace(Password)
         ? $"{Host}:{Port}"
         : $"{Host}:{Port}:{Username}:{Password}";
+
+    public string CountryCode
+    {
+        get => _countryCode;
+        set
+        {
+            var next = (value ?? "").Trim().ToUpperInvariant();
+            if (_countryCode == next)
+            {
+                return;
+            }
+
+            _countryCode = next;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(RegionText));
+        }
+    }
+
+    public string Region
+    {
+        get => _region;
+        set
+        {
+            var next = (value ?? "").Trim();
+            if (_region == next)
+            {
+                return;
+            }
+
+            _region = next;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(RegionText));
+        }
+    }
+
+    public string City
+    {
+        get => _city;
+        set
+        {
+            var next = (value ?? "").Trim();
+            if (_city == next)
+            {
+                return;
+            }
+
+            _city = next;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(RegionText));
+        }
+    }
+
+    public string RegionText
+    {
+        get
+        {
+            var region = !string.IsNullOrWhiteSpace(Region) ? Region : City;
+            if (!string.IsNullOrWhiteSpace(CountryCode) && !string.IsNullOrWhiteSpace(region))
+            {
+                return $"{CountryCode} / {region}";
+            }
+
+            return !string.IsNullOrWhiteSpace(region)
+                ? region
+                : !string.IsNullOrWhiteSpace(CountryCode) ? CountryCode : "-";
+        }
+    }
 
     public string DisplayName
     {
@@ -148,6 +222,26 @@ public sealed class ProxyEntry : INotifyPropertyChanged
         }
     }
 
+    public bool SyncSelected
+    {
+        get => _syncSelected;
+        set
+        {
+            if (_syncSelected == value)
+            {
+                return;
+            }
+
+            _syncSelected = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(SyncSelectText));
+            OnPropertyChanged(nameof(SyncCheckOpacity));
+            OnPropertyChanged(nameof(SyncSelectButtonBrush));
+            OnPropertyChanged(nameof(SyncSelectBorderBrush));
+            OnPropertyChanged(nameof(RowBackground));
+        }
+    }
+
     public bool IsOpen
     {
         get => _isOpen;
@@ -185,6 +279,18 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     public SolidColorBrush FavoriteButtonBrush => IsFavorite
         ? new SolidColorBrush(ColorHelper.FromArgb(255, 255, 193, 7))
         : new SolidColorBrush(ColorHelper.FromArgb(255, 73, 80, 87));
+
+    public string SyncSelectText => SyncSelected ? "✓" : "";
+
+    public double SyncCheckOpacity => SyncSelected ? 1.0 : 0.0;
+
+    public SolidColorBrush SyncSelectButtonBrush => SyncSelected
+        ? new SolidColorBrush(ColorHelper.FromArgb(255, 13, 110, 253))
+        : new SolidColorBrush(ColorHelper.FromArgb(255, 38, 42, 47));
+
+    public SolidColorBrush SyncSelectBorderBrush => SyncSelected
+        ? new SolidColorBrush(ColorHelper.FromArgb(255, 91, 157, 255))
+        : new SolidColorBrush(ColorHelper.FromArgb(255, 139, 148, 158));
 
     public string Status
     {
@@ -265,9 +371,11 @@ public sealed class ProxyEntry : INotifyPropertyChanged
         _ => 4
     };
 
-    public SolidColorBrush RowBackground => Used
-        ? new SolidColorBrush(ColorHelper.FromArgb(38, 40, 167, 69))
-        : new SolidColorBrush(Colors.Transparent);
+    public SolidColorBrush RowBackground => SyncSelected
+        ? new SolidColorBrush(ColorHelper.FromArgb(92, 13, 110, 253))
+        : Used
+            ? new SolidColorBrush(ColorHelper.FromArgb(38, 40, 167, 69))
+            : new SolidColorBrush(Colors.Transparent);
 
     public SolidColorBrush UsedBadgeBrush => Used
         ? new SolidColorBrush(ColorHelper.FromArgb(255, 40, 167, 69))
@@ -293,6 +401,7 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     {
         return provider?.Trim().ToLowerInvariant() switch
         {
+            "portable-chromium" or "portable chromium" or "chromium" or "portable" => "chrome",
             "chrome" => "chrome",
             "edge" => "edge",
             "firefox" => "firefox",

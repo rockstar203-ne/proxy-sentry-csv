@@ -12,6 +12,29 @@ public static class ProxyExporters
         await File.WriteAllLinesAsync(path, records.Select(record => record.StandardProxy), Encoding.UTF8);
     }
 
+    public static async Task ExportProxyCsvAsync(string path, IReadOnlyList<ProxyEntry> records)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("Proxy,Name,Browser,Country,Region,City");
+        foreach (var record in records)
+        {
+            builder.Append(Csv(record.StandardProxy));
+            builder.Append(',');
+            builder.Append(Csv(record.DisplayName));
+            builder.Append(',');
+            builder.Append(Csv(record.BrowserProvider));
+            builder.Append(',');
+            builder.Append(Csv(record.CountryCode));
+            builder.Append(',');
+            builder.Append(Csv(record.Region));
+            builder.Append(',');
+            builder.Append(Csv(record.City));
+            builder.AppendLine();
+        }
+
+        await File.WriteAllTextAsync(path, builder.ToString(), Encoding.UTF8);
+    }
+
     public static async Task ExportAdsTxtAsync(string path, IReadOnlyList<ProxyEntry> records, string profileBaseName)
     {
         var builder = new StringBuilder();
@@ -172,5 +195,13 @@ public static class ProxyExporters
             index /= 26;
         }
         return name;
+    }
+
+    private static string Csv(string value)
+    {
+        value ??= "";
+        return value.Contains('"') || value.Contains(',') || value.Contains('\n') || value.Contains('\r')
+            ? $"\"{value.Replace("\"", "\"\"")}\""
+            : value;
     }
 }

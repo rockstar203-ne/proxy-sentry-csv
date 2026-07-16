@@ -236,7 +236,7 @@ public sealed class JancyLauncher
         JancyBridgeResponse? payload;
         try
         {
-            payload = JsonSerializer.Deserialize<JancyBridgeResponse>(text, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            payload = JsonSerializer.Deserialize<JancyBridgeResponse>(text, AppJsonOptions.CaseInsensitive);
         }
         catch (JsonException ex)
         {

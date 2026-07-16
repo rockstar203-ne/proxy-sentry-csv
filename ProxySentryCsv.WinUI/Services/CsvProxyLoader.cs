@@ -19,6 +19,11 @@ public static class CsvProxyLoader
             throw new InvalidOperationException("CSV does not contain a Proxy column.");
         }
 
+        var nameIndex = FindHeader(headers, "Name");
+        var browserIndex = FindHeader(headers, "Browser");
+        var countryIndex = FindHeader(headers, "Country");
+        var regionIndex = FindHeader(headers, "Region");
+        var cityIndex = FindHeader(headers, "City");
         var proxies = new List<ProxyEntry>();
         for (var i = 1; i < lines.Length; i++)
         {
@@ -41,6 +46,16 @@ public static class CsvProxyLoader
 
             if (TryParseProxy(rawProxy, i + 1, out var proxy))
             {
+                proxy.DisplayName = GetField(fields, nameIndex);
+                var browserProvider = GetField(fields, browserIndex);
+                if (!string.IsNullOrWhiteSpace(browserProvider))
+                {
+                    proxy.BrowserProvider = browserProvider;
+                    proxy.BrowserProviderFromCsv = true;
+                }
+                proxy.CountryCode = GetField(fields, countryIndex);
+                proxy.Region = GetField(fields, regionIndex);
+                proxy.City = GetField(fields, cityIndex);
                 proxies.Add(proxy);
             }
         }
@@ -67,31 +82,31 @@ public static class CsvProxyLoader
 
         if (parts.Length >= 5 && LooksLikeScheme(parts[0]))
         {
-            scheme = parts[0];
-            host = parts[1];
-            portText = parts[2];
-            username = parts[3];
-            password = string.Join(':', parts.Skip(4));
+            scheme = parts[0].Trim();
+            host = parts[1].Trim().TrimStart('/');
+            portText = parts[2].Trim();
+            username = parts[3].Trim();
+            password = string.Join(':', parts.Skip(4)).Trim();
         }
         else if (parts.Length >= 4)
         {
             scheme = "http";
-            host = parts[0];
-            portText = parts[1];
-            username = parts[2];
-            password = string.Join(':', parts.Skip(3));
+            host = parts[0].Trim();
+            portText = parts[1].Trim();
+            username = parts[2].Trim();
+            password = string.Join(':', parts.Skip(3)).Trim();
         }
         else if (parts.Length == 3 && LooksLikeScheme(parts[0]))
         {
-            scheme = parts[0];
-            host = parts[1];
-            portText = parts[2];
+            scheme = parts[0].Trim();
+            host = parts[1].Trim().TrimStart('/');
+            portText = parts[2].Trim();
         }
         else if (parts.Length == 2)
         {
             scheme = "http";
-            host = parts[0];
-            portText = parts[1];
+            host = parts[0].Trim();
+            portText = parts[1].Trim();
         }
         else
         {
@@ -191,5 +206,15 @@ public static class CsvProxyLoader
 
         result.Add(new string(current.ToArray()));
         return result;
+    }
+
+    private static int FindHeader(IReadOnlyList<string> headers, string name)
+    {
+        return headers.ToList().FindIndex(header => string.Equals(header.Trim().TrimStart('\uFEFF'), name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string GetField(IReadOnlyList<string> fields, int index)
+    {
+        return index >= 0 && index < fields.Count ? fields[index].Trim() : "";
     }
 }

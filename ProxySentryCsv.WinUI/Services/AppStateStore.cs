@@ -38,7 +38,10 @@ public sealed class AppStateStore
                 PingMs = proxy.PingMs,
                 ResponseMs = proxy.ResponseMs,
                 SpeedGroup = proxy.SpeedGroup,
-                BrowserProvider = proxy.BrowserProvider
+                BrowserProvider = proxy.BrowserProvider,
+                CountryCode = proxy.CountryCode,
+                Region = proxy.Region,
+                City = proxy.City
             },
             StringComparer.OrdinalIgnoreCase);
 
@@ -47,7 +50,7 @@ public sealed class AppStateStore
             ProxyStates = proxyStates,
             Settings = settings
         };
-        File.WriteAllText(_statePath, JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true }));
+        File.WriteAllText(_statePath, JsonSerializer.Serialize(state, AppJsonOptions.Indented));
     }
 
     public void SaveProxyStates(IEnumerable<ProxyEntry> proxies)
@@ -83,11 +86,12 @@ public sealed class AppStateStore
         public string SearchText { get; set; } = "";
         public string TargetUrl { get; set; } = "https://www.browserscan.net";
         public string? SyncMonitorId { get; set; }
-        public string BrowserProvider { get; set; } = "jancy";
+        public string BrowserProvider { get; set; } = "chrome";
         public string JancyEndpointUrl { get; set; } = "http://127.0.0.1:43033";
         public bool AutoUpdateEnabled { get; set; }
         public string GitRepositoryPath { get; set; } = "";
         public string LastUpdatePreviousHead { get; set; } = "";
+        public int SyncClickDelayMs { get; set; }
     }
 
     public sealed class ProxyPersistedState
@@ -99,7 +103,10 @@ public sealed class AppStateStore
         public int? PingMs { get; set; }
         public int? ResponseMs { get; set; }
         public string SpeedGroup { get; set; } = "Unchecked";
-        public string BrowserProvider { get; set; } = "jancy";
+        public string BrowserProvider { get; set; } = "chrome";
+        public string CountryCode { get; set; } = "";
+        public string Region { get; set; } = "";
+        public string City { get; set; } = "";
     }
 
     private sealed class AppState

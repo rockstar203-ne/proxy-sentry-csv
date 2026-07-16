@@ -1,6 +1,9 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ProxySentryCsv.Models;
 
 namespace ProxySentryCsv.Services;
@@ -34,6 +37,8 @@ public sealed class BrowserForgeFingerprintService
                 var cached = JsonSerializer.Deserialize<BrowserForgeFingerprint>(await File.ReadAllTextAsync(path, cancellationToken));
                 if (cached is not null && !string.IsNullOrWhiteSpace(cached.UserAgent))
                 {
+                    CompleteFingerprint(cached, proxy, normalizedBrowser, browserMajorVersion, geo, string.IsNullOrWhiteSpace(cached.Source) ? "BrowserForge" : cached.Source);
+                    await File.WriteAllTextAsync(path, JsonSerializer.Serialize(cached, AppJsonOptions.Indented), cancellationToken);
                     progress?.Invoke($"BrowserForge fingerprint loaded ({cached.Source}).");
                     return cached;
                 }
@@ -47,12 +52,8 @@ public sealed class BrowserForgeFingerprintService
         try
         {
             var generated = await GenerateWithPythonAsync(normalizedBrowser, browserMajorVersion, geo, cancellationToken);
-            generated.Browser = normalizedBrowser;
-            generated.CountryCode = geo.CountryCode;
-            generated.Locale = geo.Locale;
-            generated.TimeZone = geo.TimeZone;
-            generated.Source = "BrowserForge";
-            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(generated, new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
+            CompleteFingerprint(generated, proxy, normalizedBrowser, browserMajorVersion, geo, "BrowserForge");
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(generated, AppJsonOptions.Indented), cancellationToken);
             progress?.Invoke($"BrowserForge fingerprint generated for {geo.CountryCode} ({geo.Locale}, {geo.TimeZone}).");
             return generated;
         }
@@ -60,7 +61,8 @@ public sealed class BrowserForgeFingerprintService
         {
             progress?.Invoke($"BrowserForge unavailable, using local fallback: {ex.Message}");
             var fallback = CreateFallback(normalizedBrowser, browserMajorVersion, geo);
-            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(fallback, new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
+            CompleteFingerprint(fallback, proxy, normalizedBrowser, browserMajorVersion, geo, "Fallback");
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(fallback, AppJsonOptions.Indented), cancellationToken);
             return fallback;
         }
     }
@@ -69,6 +71,100 @@ public sealed class BrowserForgeFingerprintService
     {
         var version = majorVersion.HasValue ? majorVersion.Value.ToString() : "any";
         return Path.Combine(_fingerprintRoot, $"{proxy.ProfileKey}-{browser}-{version}-{geo.CountryCode}-{geo.Locale}.json");
+    }
+
+    private static void CompleteFingerprint(BrowserForgeFingerprint fingerprint, ProxyEntry proxy, string browser, int? browserMajorVersion, ProxyGeoInfo geo, string source)
+    {
+        fingerprint.Browser = browser;
+        fingerprint.CountryCode = geo.CountryCode;
+        fingerprint.Locale = geo.Locale;
+        fingerprint.TimeZone = geo.TimeZone;
+        fingerprint.Latitude = geo.Latitude;
+        fingerprint.Longitude = geo.Longitude;
+        fingerprint.City = geo.City;
+        fingerprint.Region = geo.Region;
+        fingerprint.PostalCode = geo.PostalCode;
+        fingerprint.Source = source;
+        fingerprint.NoiseSeed = fingerprint.NoiseSeed != 0 ? fingerprint.NoiseSeed : CreateStableSeed($"{proxy.StableId}:{browser}:{geo.CountryCode}:{geo.Locale}");
+        fingerprint.Languages = NormalizeLanguages(fingerprint.Languages, geo.Locale);
+        fingerprint.AcceptLanguage = BuildAcceptLanguage(fingerprint.Languages, geo.Locale);
+        if (string.IsNullOrWhiteSpace(fingerprint.WebGLVendor))
+        {
+            fingerprint.WebGLVendor = browser == "firefox" ? "Mozilla" : "Google Inc. (Intel)";
+        }
+        if (string.IsNullOrWhiteSpace(fingerprint.WebGLRenderer))
+        {
+            fingerprint.WebGLRenderer = browser == "firefox"
+                ? "Mozilla"
+                : "ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)";
+        }
+        if (browserMajorVersion is > 0)
+        {
+            fingerprint.UserAgent = AlignUserAgentMajor(fingerprint.UserAgent, browser, browserMajorVersion.Value);
+            if (fingerprint.Headers.ContainsKey("User-Agent"))
+            {
+                fingerprint.Headers["User-Agent"] = fingerprint.UserAgent;
+            }
+            else if (fingerprint.Headers.ContainsKey("user-agent"))
+            {
+                fingerprint.Headers["user-agent"] = fingerprint.UserAgent;
+            }
+        }
+
+        fingerprint.Headers["Accept-Language"] = fingerprint.AcceptLanguage;
+    }
+
+    private static string[] NormalizeLanguages(IEnumerable<string>? languages, string locale)
+    {
+        var normalizedLocale = string.IsNullOrWhiteSpace(locale) ? "en-US" : locale.Trim();
+        var primary = normalizedLocale.Split('-')[0];
+        var result = (languages ?? [])
+            .Where(language => !string.IsNullOrWhiteSpace(language))
+            .Select(language => language.Trim())
+            .Append(normalizedLocale)
+            .Append(primary)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return result.Length > 0 ? result : [normalizedLocale, primary];
+    }
+
+    private static string BuildAcceptLanguage(IEnumerable<string>? languages, string locale)
+    {
+        var normalized = NormalizeLanguages(languages, locale);
+        return string.Join(",", normalized.Select((language, index) =>
+            index == 0
+                ? language
+                : $"{language};q={Math.Max(0.1, 1.0 - (index * 0.1)).ToString("0.0", CultureInfo.InvariantCulture)}"));
+    }
+
+    private static string AlignUserAgentMajor(string userAgent, string browser, int major)
+    {
+        if (string.IsNullOrWhiteSpace(userAgent))
+        {
+            return userAgent;
+        }
+
+        return browser switch
+        {
+            "firefox" => Regex.Replace(
+                Regex.Replace(userAgent, @"rv:\d+(?=\.)", $"rv:{major}", RegexOptions.IgnoreCase),
+                @"Firefox/\d+(?=\.)",
+                $"Firefox/{major}",
+                RegexOptions.IgnoreCase),
+            "edge" => Regex.Replace(
+                Regex.Replace(userAgent, @"Chrome/\d+(?=\.)", $"Chrome/{major}", RegexOptions.IgnoreCase),
+                @"Edg/\d+(?=\.)",
+                $"Edg/{major}",
+                RegexOptions.IgnoreCase),
+            _ => Regex.Replace(userAgent, @"Chrome/\d+(?=\.)", $"Chrome/{major}", RegexOptions.IgnoreCase)
+        };
+    }
+
+    private static int CreateStableSeed(string value)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+        return (int)(BitConverter.ToUInt32(bytes, 0) & 0x7FFFFFFF);
     }
 
     private static async Task<BrowserForgeFingerprint> GenerateWithPythonAsync(string browser, int? browserMajorVersion, ProxyGeoInfo geo, CancellationToken cancellationToken)
@@ -135,7 +231,7 @@ public sealed class BrowserForgeFingerprintService
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(stderr) ? $"Python exited with code {process.ExitCode}." : stderr.Trim());
         }
 
-        var fingerprint = JsonSerializer.Deserialize<BrowserForgeFingerprint>(stdout, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        var fingerprint = JsonSerializer.Deserialize<BrowserForgeFingerprint>(stdout, AppJsonOptions.CaseInsensitive);
         if (fingerprint is null || string.IsNullOrWhiteSpace(fingerprint.UserAgent))
         {
             throw new InvalidOperationException("BrowserForge returned an empty fingerprint.");
@@ -160,12 +256,19 @@ public sealed class BrowserForgeFingerprintService
             CountryCode = geo.CountryCode,
             Locale = geo.Locale,
             TimeZone = geo.TimeZone,
+            Latitude = geo.Latitude,
+            Longitude = geo.Longitude,
+            City = geo.City,
+            Region = geo.Region,
+            PostalCode = geo.PostalCode,
             Source = "Fallback",
             UserAgent = userAgent,
-            AcceptLanguage = $"{geo.Locale},{geo.Locale.Split('-')[0]};q=0.9,en;q=0.8",
+            AcceptLanguage = BuildAcceptLanguage(null, geo.Locale),
             Platform = "Win32",
             Vendor = browser == "firefox" ? "" : "Google Inc.",
-            Languages = [geo.Locale, geo.Locale.Split('-')[0], "en"],
+            WebGLVendor = browser == "firefox" ? "Mozilla" : "Google Inc. (Intel)",
+            WebGLRenderer = browser == "firefox" ? "Mozilla" : "ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            Languages = NormalizeLanguages(null, geo.Locale),
             HardwareConcurrency = 8,
             DeviceMemory = browser == "firefox" ? null : 8,
             MaxTouchPoints = 0,
@@ -182,7 +285,7 @@ public sealed class BrowserForgeFingerprintService
             Headers = new Dictionary<string, string>
             {
                 ["User-Agent"] = userAgent,
-                ["Accept-Language"] = $"{geo.Locale},{geo.Locale.Split('-')[0]};q=0.9,en;q=0.8"
+                ["Accept-Language"] = BuildAcceptLanguage(null, geo.Locale)
             }
         };
     }
@@ -191,6 +294,7 @@ public sealed class BrowserForgeFingerprintService
     {
         return browser.Trim().ToLowerInvariant() switch
         {
+            "portable-chromium" or "portable chromium" or "chromium" or "portable" => "chrome",
             "edge" => "edge",
             "firefox" => "firefox",
             _ => "chrome"
@@ -229,6 +333,7 @@ fp = convert(FingerprintGenerator(browser=bf_browser, os="windows", device="desk
 headers = fp.get("headers") or HeaderGenerator(browser=bf_browser, os="windows", device="desktop", locale=locale, http_version=2).generate()
 navigator = fp.get("navigator") or {}
 screen_data = fp.get("screen") or {}
+video_card = fp.get("videoCard") or {}
 
 payload = {
     "browser": browser,
@@ -240,6 +345,8 @@ payload = {
     "acceptLanguage": headers.get("Accept-Language") or headers.get("accept-language") or navigator.get("language") or "en-US,en;q=0.9",
     "platform": navigator.get("platform") or "Win32",
     "vendor": navigator.get("vendor") or ("" if browser == "firefox" else "Google Inc."),
+    "webGLVendor": video_card.get("vendor") or ("" if browser == "firefox" else "Google Inc. (Intel)"),
+    "webGLRenderer": video_card.get("renderer") or ("" if browser == "firefox" else "ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)"),
     "languages": navigator.get("languages") or [navigator.get("language") or locale],
     "hardwareConcurrency": navigator.get("hardwareConcurrency"),
     "deviceMemory": navigator.get("deviceMemory"),
@@ -272,11 +379,19 @@ public sealed class BrowserForgeFingerprint
     public string CountryCode { get; set; } = "US";
     public string Locale { get; set; } = "en-US";
     public string TimeZone { get; set; } = "America/New_York";
+    public double Latitude { get; set; } = 34.0522;
+    public double Longitude { get; set; } = -118.2437;
+    public string City { get; set; } = "Los Angeles";
+    public string Region { get; set; } = "California";
+    public string PostalCode { get; set; } = "90013";
     public string UserAgent { get; set; } = "";
     public string AcceptLanguage { get; set; } = "en-US,en;q=0.9";
     public string Platform { get; set; } = "Win32";
     public string Vendor { get; set; } = "Google Inc.";
+    public string WebGLVendor { get; set; } = "Google Inc. (Intel)";
+    public string WebGLRenderer { get; set; } = "ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)";
     public string[] Languages { get; set; } = ["en-US", "en"];
+    public int NoiseSeed { get; set; }
     public int? HardwareConcurrency { get; set; }
     public int? DeviceMemory { get; set; }
     public int? MaxTouchPoints { get; set; }

@@ -13,18 +13,20 @@ public sealed class LocalProxyRelay : IDisposable
     private readonly int _upstreamPort;
     private readonly string _username;
     private readonly string _password;
+    private readonly Action<string>? _progress;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _acceptLoop;
     private bool _disposed;
 
-    private LocalProxyRelay(ProxyEntry proxy)
+    private LocalProxyRelay(ProxyEntry proxy, Action<string>? progress)
     {
         _upstreamScheme = proxy.Scheme.Trim().ToLowerInvariant();
         _upstreamHost = proxy.Host;
         _upstreamPort = proxy.Port;
         _username = proxy.Username;
         _password = proxy.Password;
+        _progress = progress;
         _listener = new TcpListener(IPAddress.Loopback, 0);
         _listener.Start(128);
         Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
@@ -33,14 +35,14 @@ public sealed class LocalProxyRelay : IDisposable
 
     public int Port { get; }
 
-    public static LocalProxyRelay Start(ProxyEntry proxy)
+    public static LocalProxyRelay Start(ProxyEntry proxy, Action<string>? progress = null)
     {
         if (proxy.Scheme.StartsWith("socks", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException("System browser proxy relay currently supports HTTP/HTTPS proxy endpoints. SOCKS proxies need direct browser support.");
         }
 
-        return new LocalProxyRelay(proxy);
+        return new LocalProxyRelay(proxy, progress);
     }
 
     public void Dispose()
@@ -115,12 +117,35 @@ public sealed class LocalProxyRelay : IDisposable
                     await upstreamStream.WriteAsync(header.Buffer.AsMemory(header.HeaderLength, extraLength), token);
                 }
 
+                if (ShouldInspectUpstreamResponse(headerText))
+                {
+                    var responseHeader = await ReadHeaderAsync(upstreamStream, token);
+                    if (responseHeader.HeaderLength == 0)
+                    {
+                        return;
+                    }
+
+                    var responseText = Encoding.ASCII.GetString(responseHeader.Buffer, 0, responseHeader.HeaderLength);
+                    if (IsProxyAuthenticationRequired(responseText))
+                    {
+                        _progress?.Invoke($"Proxy authentication failed upstream: {_upstreamHost}:{_upstreamPort}. Check username/password for this proxy.");
+                        await WriteLocalProxyErrorAsync(clientStream, "Upstream proxy authentication failed. Check proxy username/password in CSV.", token);
+                        return;
+                    }
+
+                    await clientStream.WriteAsync(responseHeader.Buffer.AsMemory(0, responseHeader.BytesRead), token);
+                }
+
                 var upload = PumpAsync(clientStream, upstreamStream, token);
                 var download = PumpAsync(upstreamStream, clientStream, token);
                 await Task.WhenAny(upload, download);
             }
-            catch
+            catch (Exception ex)
             {
+                if (!_stop.IsCancellationRequested)
+                {
+                    _progress?.Invoke($"Proxy relay failed: {ex.Message}");
+                }
             }
             finally
             {
@@ -206,6 +231,58 @@ public sealed class LocalProxyRelay : IDisposable
 
         builder.Append("\r\n");
         return builder.ToString();
+    }
+
+    private static bool IsConnectRequest(string headerText)
+    {
+        return headerText.StartsWith("CONNECT ", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldInspectUpstreamResponse(string headerText)
+    {
+        return IsConnectRequest(headerText) || !HasRequestBody(headerText);
+    }
+
+    private static bool HasRequestBody(string headerText)
+    {
+        foreach (var line in headerText.Split(["\r\n"], StringSplitOptions.None))
+        {
+            if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)
+                && long.TryParse(line["Content-Length:".Length..].Trim(), out var contentLength)
+                && contentLength > 0)
+            {
+                return true;
+            }
+
+            if (line.StartsWith("Transfer-Encoding:", StringComparison.OrdinalIgnoreCase)
+                && !line.Contains("identity", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsProxyAuthenticationRequired(string headerText)
+    {
+        var firstLineEnd = headerText.IndexOf("\r\n", StringComparison.Ordinal);
+        var firstLine = firstLineEnd >= 0 ? headerText[..firstLineEnd] : headerText;
+        return firstLine.Contains(" 407 ", StringComparison.Ordinal)
+            || firstLine.EndsWith(" 407", StringComparison.Ordinal)
+            || firstLine.Contains("407 Proxy Authentication", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task WriteLocalProxyErrorAsync(NetworkStream stream, string message, CancellationToken token)
+    {
+        var body = Encoding.UTF8.GetBytes(message);
+        var header = Encoding.ASCII.GetBytes(
+            "HTTP/1.1 502 Bad Gateway\r\n" +
+            "Content-Type: text/plain; charset=utf-8\r\n" +
+            $"Content-Length: {body.Length}\r\n" +
+            "Connection: close\r\n\r\n");
+        await stream.WriteAsync(header, token);
+        await stream.WriteAsync(body, token);
     }
 
     private string? BuildProxyAuthorizationHeader()

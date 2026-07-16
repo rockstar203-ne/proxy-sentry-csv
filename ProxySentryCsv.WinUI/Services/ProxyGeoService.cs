@@ -24,7 +24,9 @@ public sealed class ProxyGeoService
             try
             {
                 var cached = JsonSerializer.Deserialize<ProxyGeoInfo>(await File.ReadAllTextAsync(path, cancellationToken));
-                if (cached is not null && !string.IsNullOrWhiteSpace(cached.CountryCode))
+                if (cached is not null
+                    && !string.IsNullOrWhiteSpace(cached.CountryCode)
+                    && cached.HasCoordinates)
                 {
                     progress?.Invoke($"Proxy geo loaded: {cached.CountryCode}, {cached.Locale}, {cached.TimeZone}.");
                     return cached;
@@ -38,7 +40,7 @@ public sealed class ProxyGeoService
         try
         {
             var geo = await DetectViaProxyAsync(proxy, cancellationToken);
-            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(geo, new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(geo, AppJsonOptions.Indented), cancellationToken);
             progress?.Invoke($"Proxy geo detected through proxy: {geo.CountryCode}, {geo.Locale}, {geo.TimeZone}.");
             return geo;
         }
@@ -50,7 +52,7 @@ public sealed class ProxyGeoService
         try
         {
             var geo = await DetectHostGeoAsync(proxy, cancellationToken);
-            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(geo, new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(geo, AppJsonOptions.Indented), cancellationToken);
             progress?.Invoke($"Proxy host geo detected: {geo.CountryCode}, {geo.Locale}, {geo.TimeZone}.");
             return geo;
         }
@@ -77,23 +79,23 @@ public sealed class ProxyGeoService
             AllowAutoRedirect = false
         };
         using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
-        var payload = await FetchIpApiAsync(client, "http://ip-api.com/json/?fields=status,countryCode,timezone,query", cancellationToken);
-        return FromCountry(payload.CountryCode, payload.Timezone, payload.Query);
+        var payload = await FetchIpApiAsync(client, "http://ip-api.com/json/?fields=status,countryCode,timezone,query,lat,lon,city,regionName,zip", cancellationToken);
+        return FromCountry(payload);
     }
 
     private async Task<ProxyGeoInfo> DetectHostGeoAsync(ProxyEntry proxy, CancellationToken cancellationToken)
     {
         var payload = await FetchIpApiAsync(
             _directClient,
-            $"http://ip-api.com/json/{Uri.EscapeDataString(proxy.Host)}?fields=status,countryCode,timezone,query",
+            $"http://ip-api.com/json/{Uri.EscapeDataString(proxy.Host)}?fields=status,countryCode,timezone,query,lat,lon,city,regionName,zip",
             cancellationToken);
-        return FromCountry(payload.CountryCode, payload.Timezone, payload.Query);
+        return FromCountry(payload);
     }
 
     private static async Task<IpApiResponse> FetchIpApiAsync(HttpClient client, string uri, CancellationToken cancellationToken)
     {
         var response = await client.GetStringAsync(uri, cancellationToken);
-        var payload = JsonSerializer.Deserialize<IpApiResponse>(response, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        var payload = JsonSerializer.Deserialize<IpApiResponse>(response, AppJsonOptions.CaseInsensitive);
         if (payload is null || !string.Equals(payload.Status, "success", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException("geo lookup failed");
@@ -108,17 +110,55 @@ public sealed class ProxyGeoService
         return new string(chars);
     }
 
-    private static ProxyGeoInfo FromCountry(string? countryCode, string? timeZone, string? query)
+    private static ProxyGeoInfo FromCountry(IpApiResponse payload)
+    {
+        return FromCountry(
+            payload.CountryCode,
+            payload.Timezone,
+            payload.Query,
+            payload.Lat,
+            payload.Lon,
+            payload.City,
+            payload.RegionName,
+            payload.Zip);
+    }
+
+    private static ProxyGeoInfo FromCountry(
+        string? countryCode,
+        string? timeZone,
+        string? query,
+        double? latitude = null,
+        double? longitude = null,
+        string? city = null,
+        string? region = null,
+        string? postalCode = null)
     {
         var country = (countryCode ?? "").Trim().ToUpperInvariant();
         var locale = CountryLocale(country);
         var zone = !string.IsNullOrWhiteSpace(timeZone) ? timeZone.Trim() : CountryTimeZone(country);
+        var fallback = CountryFallbackLocation(country);
         return new ProxyGeoInfo
         {
             Query = query ?? "",
             CountryCode = string.IsNullOrWhiteSpace(country) ? "US" : country,
             Locale = locale,
-            TimeZone = zone
+            TimeZone = zone,
+            Latitude = latitude is > -90 and < 90 ? latitude.Value : fallback.Latitude,
+            Longitude = longitude is > -180 and < 180 ? longitude.Value : fallback.Longitude,
+            City = !string.IsNullOrWhiteSpace(city) ? city.Trim() : fallback.City,
+            Region = !string.IsNullOrWhiteSpace(region) ? region.Trim() : fallback.Region,
+            PostalCode = !string.IsNullOrWhiteSpace(postalCode) ? postalCode.Trim() : fallback.PostalCode
+        };
+    }
+
+    private static ProxyGeoLocation CountryFallbackLocation(string countryCode)
+    {
+        return countryCode switch
+        {
+            "US" => new ProxyGeoLocation(34.0522, -118.2437, "Los Angeles", "California", "90013"),
+            "CA" => new ProxyGeoLocation(43.6532, -79.3832, "Toronto", "Ontario", "M5H"),
+            "GB" or "IE" => new ProxyGeoLocation(51.5074, -0.1278, "London", "England", "SW1A"),
+            _ => new ProxyGeoLocation(34.0522, -118.2437, "Los Angeles", "California", "90013")
         };
     }
 
@@ -205,6 +245,11 @@ public sealed class ProxyGeoService
         public string CountryCode { get; set; } = "";
         public string Timezone { get; set; } = "";
         public string Query { get; set; } = "";
+        public double? Lat { get; set; }
+        public double? Lon { get; set; }
+        public string City { get; set; } = "";
+        public string RegionName { get; set; } = "";
+        public string Zip { get; set; } = "";
     }
 }
 
@@ -214,4 +259,12 @@ public sealed class ProxyGeoInfo
     public string CountryCode { get; set; } = "US";
     public string Locale { get; set; } = "en-US";
     public string TimeZone { get; set; } = "America/New_York";
+    public double Latitude { get; set; } = 34.0522;
+    public double Longitude { get; set; } = -118.2437;
+    public string City { get; set; } = "Los Angeles";
+    public string Region { get; set; } = "California";
+    public string PostalCode { get; set; } = "90013";
+    public bool HasCoordinates => Latitude is > -90 and < 90 && Longitude is > -180 and < 180;
 }
+
+public sealed record ProxyGeoLocation(double Latitude, double Longitude, string City, string Region, string PostalCode);
