@@ -1503,9 +1503,12 @@ Jancy setup:
                 || proxy.RegionText.Contains(search, StringComparison.OrdinalIgnoreCase));
         }
 
+        var visible = filtered.ToList();
         Proxies.Clear();
-        foreach (var proxy in filtered)
+        for (var index = 0; index < visible.Count; index++)
         {
+            var proxy = visible[index];
+            proxy.ListNumber = index + 1;
             Proxies.Add(proxy);
         }
 

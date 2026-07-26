@@ -159,7 +159,7 @@
                 VerticalScrollBarVisibility="Disabled">
                 <ListView
                     x:Name="ProxyList"
-                    MinWidth="1590"
+                    MinWidth="1660"
                     ItemsSource="{x:Bind Proxies, Mode=OneWay}"
                     SelectionChanged="ProxyList_SelectionChanged"
                     SelectionMode="Extended">
@@ -179,12 +179,13 @@
                     </ListView.ItemContainerStyle>
                     <ListView.Header>
                         <Grid
-                            MinWidth="1590"
+                            MinWidth="1660"
                             Padding="10,8"
                             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
                             BorderThickness="0,0,0,1"
                             ColumnSpacing="10">
                             <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="48" />
                                 <ColumnDefinition Width="72" />
                                 <ColumnDefinition Width="150" />
                                 <ColumnDefinition Width="114" />
@@ -199,28 +200,30 @@
                                 <ColumnDefinition Width="242" />
                             </Grid.ColumnDefinitions>
 
-                            <TextBlock FontWeight="SemiBold" Text="Select" />
-                            <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="Name" />
-                            <TextBlock Grid.Column="2" FontWeight="SemiBold" Text="Browser" />
-                            <TextBlock Grid.Column="3" FontWeight="SemiBold" Text="Group" />
-                            <TextBlock Grid.Column="4" FontWeight="SemiBold" Text="Proxy" />
-                            <TextBlock Grid.Column="5" FontWeight="SemiBold" Text="Region" />
-                            <TextBlock Grid.Column="6" FontWeight="SemiBold" Text="Ping" />
-                            <TextBlock Grid.Column="7" FontWeight="SemiBold" Text="Resp" />
-                            <TextBlock Grid.Column="8" FontWeight="SemiBold" Text="Used" />
-                            <TextBlock Grid.Column="9" FontWeight="SemiBold" Text="Status" />
-                            <TextBlock Grid.Column="10" FontWeight="SemiBold" Text="Favorite" />
-                            <TextBlock Grid.Column="11" FontWeight="SemiBold" Text="Actions" />
+                            <TextBlock FontWeight="SemiBold" Text="#" />
+                            <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="Select" />
+                            <TextBlock Grid.Column="2" FontWeight="SemiBold" Text="Name" />
+                            <TextBlock Grid.Column="3" FontWeight="SemiBold" Text="Browser" />
+                            <TextBlock Grid.Column="4" FontWeight="SemiBold" Text="Group" />
+                            <TextBlock Grid.Column="5" FontWeight="SemiBold" Text="Proxy" />
+                            <TextBlock Grid.Column="6" FontWeight="SemiBold" Text="Region" />
+                            <TextBlock Grid.Column="7" FontWeight="SemiBold" Text="Ping" />
+                            <TextBlock Grid.Column="8" FontWeight="SemiBold" Text="Resp" />
+                            <TextBlock Grid.Column="9" FontWeight="SemiBold" Text="Used" />
+                            <TextBlock Grid.Column="10" FontWeight="SemiBold" Text="Status" />
+                            <TextBlock Grid.Column="11" FontWeight="SemiBold" Text="Favorite" />
+                            <TextBlock Grid.Column="12" FontWeight="SemiBold" Text="Actions" />
                         </Grid>
                     </ListView.Header>
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="models:ProxyEntry">
                             <Grid
-                                MinWidth="1590"
+                                MinWidth="1660"
                                 Padding="10,6"
                                 Background="{Binding RowBackground}"
                                 ColumnSpacing="10">
                                 <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="48" />
                                     <ColumnDefinition Width="72" />
                                     <ColumnDefinition Width="150" />
                                     <ColumnDefinition Width="114" />
@@ -235,7 +238,13 @@
                                     <ColumnDefinition Width="242" />
                                 </Grid.ColumnDefinitions>
 
+                                <TextBlock
+                                    HorizontalAlignment="Left"
+                                    VerticalAlignment="Center"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="{Binding ListNumber}" />
                                 <Button
+                                    Grid.Column="1"
                                     Width="34"
                                     Height="28"
                                     Padding="0"
@@ -259,13 +268,13 @@
                                     </Viewbox>
                                 </Button>
                                 <TextBox
-                                    Grid.Column="1"
+                                    Grid.Column="2"
                                     VerticalAlignment="Center"
                                     PlaceholderText="Name"
                                     Text="{Binding DisplayName, Mode=TwoWay}"
                                     TextChanged="ProxyName_TextChanged" />
                                 <ComboBox
-                                    Grid.Column="2"
+                                    Grid.Column="3"
                                     MinWidth="102"
                                     SelectedValue="{Binding BrowserProvider, Mode=TwoWay}"
                                     SelectedValuePath="Tag"
@@ -276,7 +285,7 @@
                                     <ComboBoxItem Content="Firefox" Tag="firefox" />
                                 </ComboBox>
                                 <Border
-                                    Grid.Column="3"
+                                    Grid.Column="4"
                                     Width="82"
                                     Padding="8,3"
                                     HorizontalAlignment="Left"
@@ -288,20 +297,20 @@
                                         Text="{Binding SpeedGroup}" />
                                 </Border>
                                 <TextBlock
-                                    Grid.Column="4"
+                                    Grid.Column="5"
                                     VerticalAlignment="Center"
                                     Text="{Binding ProxyDisplay}"
                                     TextTrimming="CharacterEllipsis"
                                     ToolTipService.ToolTip="{Binding StandardProxy}" />
                                 <TextBlock
-                                    Grid.Column="5"
+                                    Grid.Column="6"
                                     VerticalAlignment="Center"
                                     Text="{Binding RegionText}"
                                     TextTrimming="CharacterEllipsis" />
-                                <TextBlock Grid.Column="6" VerticalAlignment="Center" Text="{Binding PingText}" />
-                                <TextBlock Grid.Column="7" VerticalAlignment="Center" Text="{Binding ResponseText}" />
+                                <TextBlock Grid.Column="7" VerticalAlignment="Center" Text="{Binding PingText}" />
+                                <TextBlock Grid.Column="8" VerticalAlignment="Center" Text="{Binding ResponseText}" />
                                 <Border
-                                    Grid.Column="8"
+                                    Grid.Column="9"
                                     Width="62"
                                     Padding="8,3"
                                     HorizontalAlignment="Left"
@@ -313,19 +322,19 @@
                                         Text="{Binding UsedText}" />
                                 </Border>
                                 <TextBlock
-                                    Grid.Column="9"
+                                    Grid.Column="10"
                                     VerticalAlignment="Center"
                                     Text="{Binding Status}"
                                     TextTrimming="CharacterEllipsis" />
                                 <Button
-                                    Grid.Column="10"
+                                    Grid.Column="11"
                                     MinWidth="76"
                                     Background="{Binding FavoriteButtonBrush}"
                                     Click="FavoriteProxy_Click"
                                     Content="{Binding FavoriteButtonText}"
                                     Foreground="White" />
                                 <StackPanel
-                                    Grid.Column="11"
+                                    Grid.Column="12"
                                     Orientation="Horizontal"
                                     Spacing="6">
                                     <Button

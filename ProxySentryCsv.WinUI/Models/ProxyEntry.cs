@@ -24,8 +24,24 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     private string _region = "";
     private string _city = "";
     private string _email = "";
+    private int _listNumber;
 
     public int RowNumber { get; set; }
+    public int ListNumber
+    {
+        get => _listNumber;
+        set
+        {
+            if (_listNumber == value)
+            {
+                return;
+            }
+
+            _listNumber = value;
+            OnPropertyChanged();
+        }
+    }
+
     public string Scheme { get; set; } = "http";
     public string Host { get; set; } = "";
     public int Port { get; set; }
