@@ -20,6 +20,7 @@ public static class CsvProxyLoader
         }
 
         var nameIndex = FindHeader(headers, "Name");
+        var emailIndex = FindAnyHeader(headers, "Email", "E-mail", "Mail", "ProfileEmail", "Profile Email");
         var browserIndex = FindHeader(headers, "Browser");
         var countryIndex = FindHeader(headers, "Country");
         var regionIndex = FindHeader(headers, "Region");
@@ -47,6 +48,7 @@ public static class CsvProxyLoader
             if (TryParseProxy(rawProxy, i + 1, out var proxy))
             {
                 proxy.DisplayName = GetField(fields, nameIndex);
+                proxy.Email = GetField(fields, emailIndex);
                 var browserProvider = GetField(fields, browserIndex);
                 if (!string.IsNullOrWhiteSpace(browserProvider))
                 {
@@ -211,6 +213,20 @@ public static class CsvProxyLoader
     private static int FindHeader(IReadOnlyList<string> headers, string name)
     {
         return headers.ToList().FindIndex(header => string.Equals(header.Trim().TrimStart('\uFEFF'), name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static int FindAnyHeader(IReadOnlyList<string> headers, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            var index = FindHeader(headers, name);
+            if (index >= 0)
+            {
+                return index;
+            }
+        }
+
+        return -1;
     }
 
     private static string GetField(IReadOnlyList<string> fields, int index)

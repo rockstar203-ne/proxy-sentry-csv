@@ -15,12 +15,14 @@ public static class ProxyExporters
     public static async Task ExportProxyCsvAsync(string path, IReadOnlyList<ProxyEntry> records)
     {
         var builder = new StringBuilder();
-        builder.AppendLine("Proxy,Name,Browser,Country,Region,City");
+        builder.AppendLine("Proxy,Name,Email,Browser,Country,Region,City");
         foreach (var record in records)
         {
             builder.Append(Csv(record.StandardProxy));
             builder.Append(',');
             builder.Append(Csv(record.DisplayName));
+            builder.Append(',');
+            builder.Append(Csv(record.Email));
             builder.Append(',');
             builder.Append(Csv(record.BrowserProvider));
             builder.Append(',');

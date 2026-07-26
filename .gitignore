@@ -8,3 +8,4 @@ release-next/
 *.suo
 *.userosscache
 *.sln.docstates
+*Backup authentication codes*.txt

@@ -23,6 +23,7 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     private string _countryCode = "";
     private string _region = "";
     private string _city = "";
+    private string _email = "";
 
     public int RowNumber { get; set; }
     public string Scheme { get; set; } = "http";
@@ -166,6 +167,22 @@ public sealed class ProxyEntry : INotifyPropertyChanged
             }
 
             _displayName = value;
+            OnPropertyChanged();
+        }
+    }
+
+    public string Email
+    {
+        get => _email;
+        set
+        {
+            var next = (value ?? "").Trim();
+            if (_email == next)
+            {
+                return;
+            }
+
+            _email = next;
             OnPropertyChanged();
         }
     }

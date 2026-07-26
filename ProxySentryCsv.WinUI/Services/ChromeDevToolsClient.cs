@@ -30,6 +30,14 @@ internal sealed class ChromeDevToolsClient : IDisposable
         return new ChromeDevToolsClient(webSocket);
     }
 
+    public static async Task<ChromeDevToolsClient> ConnectBrowserAsync(int debuggingPort, CancellationToken cancellationToken)
+    {
+        var webSocketUrl = await GetBrowserWebSocketUrlAsync(debuggingPort, cancellationToken);
+        var webSocket = new ClientWebSocket();
+        await webSocket.ConnectAsync(new Uri(webSocketUrl), cancellationToken);
+        return new ChromeDevToolsClient(webSocket);
+    }
+
     public async Task<JsonElement> SendAsync(string method, object? parameters = null, CancellationToken cancellationToken = default, string? sessionId = null)
     {
         var id = Interlocked.Increment(ref _nextCommandId);
@@ -191,6 +199,35 @@ internal sealed class ChromeDevToolsClient : IDisposable
         }
 
         throw new InvalidOperationException(lastError?.Message ?? "Chrome DevTools page target was not available.");
+    }
+
+    private static async Task<string> GetBrowserWebSocketUrlAsync(int debuggingPort, CancellationToken cancellationToken)
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        var endpoint = $"http://127.0.0.1:{debuggingPort}/json/version";
+        Exception? lastError = null;
+        for (var attempt = 0; attempt < 80; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var json = await client.GetStringAsync(endpoint, cancellationToken);
+                using var document = JsonDocument.Parse(json);
+                if (document.RootElement.TryGetProperty("webSocketDebuggerUrl", out var webSocketUrl)
+                    && !string.IsNullOrWhiteSpace(webSocketUrl.GetString()))
+                {
+                    return webSocketUrl.GetString()!;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                lastError = ex;
+            }
+
+            await Task.Delay(100, cancellationToken);
+        }
+
+        throw new InvalidOperationException(lastError?.Message ?? "Chrome DevTools browser target was not available.");
     }
 
     private static async Task<string> ReceiveWebSocketTextAsync(ClientWebSocket webSocket, CancellationToken cancellationToken)

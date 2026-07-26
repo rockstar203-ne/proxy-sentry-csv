@@ -28,8 +28,16 @@
                     <Button x:Name="ExportAdsButton" Click="ExportAds_Click" Content="Export ADS" />
                     <Button x:Name="ExportTxtButton" Click="ExportTxt_Click" Content="Export TXT" />
                     <Button x:Name="CheckAllButton" Click="CheckAll_Click" Content="Check all" />
-                    <Button x:Name="SortSpeedButton" Click="SortSpeed_Click" Content="Sort speed" />
+                    <Button x:Name="SortButton" Content="Sort">
+                        <Button.Flyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Click="SortBySpeed_Click" Text="By speed" />
+                                <MenuFlyoutItem Click="SortByDocumentOrder_Click" Text="Document order" />
+                            </MenuFlyout>
+                        </Button.Flyout>
+                    </Button>
                     <Button x:Name="ClearUsedButton" Click="ClearUsed_Click" Content="Clear used" />
+                    <Button x:Name="CacheButton" Click="Cache_Click" Content="Cache: ..." />
                     <Button x:Name="CloseAllButton" Click="CloseAll_Click" Content="Close All" />
                     <Button x:Name="SettingsButton" Click="Settings_Click" Content="Settings" />
                     <Button x:Name="AboutButton" Click="About_Click" Content="About" />
@@ -151,7 +159,7 @@
                 VerticalScrollBarVisibility="Disabled">
                 <ListView
                     x:Name="ProxyList"
-                    MinWidth="1520"
+                    MinWidth="1590"
                     ItemsSource="{x:Bind Proxies, Mode=OneWay}"
                     SelectionChanged="ProxyList_SelectionChanged"
                     SelectionMode="Extended">
@@ -171,7 +179,7 @@
                     </ListView.ItemContainerStyle>
                     <ListView.Header>
                         <Grid
-                            MinWidth="1520"
+                            MinWidth="1590"
                             Padding="10,8"
                             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
                             BorderThickness="0,0,0,1"
@@ -188,7 +196,7 @@
                                 <ColumnDefinition Width="72" />
                                 <ColumnDefinition Width="130" />
                                 <ColumnDefinition Width="88" />
-                                <ColumnDefinition Width="172" />
+                                <ColumnDefinition Width="242" />
                             </Grid.ColumnDefinitions>
 
                             <TextBlock FontWeight="SemiBold" Text="Select" />
@@ -208,7 +216,7 @@
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="models:ProxyEntry">
                             <Grid
-                                MinWidth="1520"
+                                MinWidth="1590"
                                 Padding="10,6"
                                 Background="{Binding RowBackground}"
                                 ColumnSpacing="10">
@@ -224,7 +232,7 @@
                                     <ColumnDefinition Width="72" />
                                     <ColumnDefinition Width="130" />
                                     <ColumnDefinition Width="88" />
-                                    <ColumnDefinition Width="172" />
+                                    <ColumnDefinition Width="242" />
                                 </Grid.ColumnDefinitions>
 
                                 <Button
@@ -320,6 +328,10 @@
                                     Grid.Column="11"
                                     Orientation="Horizontal"
                                     Spacing="6">
+                                    <Button
+                                        MinWidth="70"
+                                        Click="ClearProxyCache_Click"
+                                        Content="Cache" />
                                     <Button
                                         MinWidth="76"
                                         Background="{Binding CopyButtonBrush}"

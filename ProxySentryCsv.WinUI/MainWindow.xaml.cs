@@ -23,6 +23,7 @@ public sealed partial class MainWindow : Window
     private readonly JancyLauncher _jancyLauncher;
     private readonly BrowserForgeFingerprintService _browserForgeFingerprints;
     private readonly ProxyGeoService _proxyGeoService;
+    private readonly BrowserCacheService _browserCache;
     private readonly ProxySpeedChecker _proxySpeedChecker = new();
     private AppWindow? _appWindow;
     private ProxyListEntry? _activeList;
@@ -37,6 +38,9 @@ public sealed partial class MainWindow : Window
     private List<string> _lastJancySyncStableIds = [];
     private List<string> _lastChromeSyncStableIds = [];
     private int _syncClickDelayMs;
+    private bool _showChromeEmailButton;
+    private bool _showEdgeEmailButton;
+    private bool _showFirefoxEmailButton;
 
     public ObservableCollection<ProxyEntry> Proxies { get; } = [];
     public ObservableCollection<ProxyListEntry> ProxyLists { get; } = [];
@@ -48,6 +52,7 @@ public sealed partial class MainWindow : Window
         _stateStore = new AppStateStore(_appDataPath);
         _browserForgeFingerprints = new BrowserForgeFingerprintService(_appDataPath);
         _proxyGeoService = new ProxyGeoService(_appDataPath);
+        _browserCache = new BrowserCacheService(_appDataPath);
         _systemBrowserLauncher = new SystemBrowserLauncher(_appDataPath, _browserForgeFingerprints);
         _jancyLauncher = new JancyLauncher(_appDataPath);
         _systemBrowserLauncher.ProfilesClosed += SystemBrowserLauncher_ProfilesClosed;
@@ -58,6 +63,7 @@ public sealed partial class MainWindow : Window
         _suppressStateSave = false;
         Closed += MainWindow_Closed;
         _ = RunAutoUpdateOnStartupAsync();
+        _ = RefreshCacheSizeAsync();
     }
 
     private async void OpenCsv_Click(object sender, RoutedEventArgs e)
@@ -1012,7 +1018,7 @@ Jancy setup:
         }
 
         CheckAllButton.IsEnabled = false;
-        SortSpeedButton.IsEnabled = false;
+        SortButton.IsEnabled = false;
         OpenCsvButton.IsEnabled = false;
         var checkAllContent = CheckAllButton.Content;
         CheckAllButton.Content = new StackPanel
@@ -1106,16 +1112,108 @@ Jancy setup:
         {
             CheckAllButton.Content = checkAllContent;
             CheckAllButton.IsEnabled = true;
-            SortSpeedButton.IsEnabled = true;
+            SortButton.IsEnabled = true;
             OpenCsvButton.IsEnabled = true;
         }
     }
 
-    private void SortSpeed_Click(object sender, RoutedEventArgs e)
+    private void SortBySpeed_Click(object sender, RoutedEventArgs e)
     {
         SortProxiesBySpeed();
         SaveState();
         UpdateSummary();
+        ShowMessage("Sorted by speed.", InfoBarSeverity.Informational);
+    }
+
+    private void SortByDocumentOrder_Click(object sender, RoutedEventArgs e)
+    {
+        SortProxiesByDocumentOrder();
+        SaveState();
+        UpdateSummary();
+        ShowMessage("Sorted by document order.", InfoBarSeverity.Informational);
+    }
+
+    private async void Cache_Click(object sender, RoutedEventArgs e)
+    {
+        CacheButton.IsEnabled = false;
+        try
+        {
+            var size = await _browserCache.GetTotalCacheSizeAsync();
+            CacheButton.Content = $"Cache: {BrowserCacheService.FormatBytes(size)}";
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Root.XamlRoot,
+                Title = "Browser cache",
+                Content = $"System browser cache: {BrowserCacheService.FormatBytes(size)}{Environment.NewLine}{Environment.NewLine}Only Chrome, Edge, and Firefox cache folders will be cleared. Cookies, sessions, fingerprints, proxy state, and Jancy profiles will not be touched.",
+                PrimaryButtonText = size > 0 ? "Clear cache" : "",
+                CloseButtonText = "Close",
+                DefaultButton = ContentDialogButton.Primary
+            };
+
+            var result = await dialog.ShowAsync();
+            if (result != ContentDialogResult.Primary || size <= 0)
+            {
+                return;
+            }
+
+            CacheButton.Content = "Cache: clearing...";
+            ShowMessage("Clearing system browser cache. Close browser windows first if files are locked.", InfoBarSeverity.Informational);
+            var cleanup = await _browserCache.ClearAllCacheAsync();
+            await RefreshCacheSizeAsync();
+
+            var message = cleanup.FailedItems == 0
+                ? $"Cleared {BrowserCacheService.FormatBytes(cleanup.BytesBefore)} cache."
+                : $"Cleared {BrowserCacheService.FormatBytes(cleanup.BytesBefore)} cache. Skipped locked items: {cleanup.FailedItems}.";
+            ShowMessage(message, cleanup.FailedItems == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
+        }
+        catch (Exception ex)
+        {
+            ShowMessage(ex.Message, InfoBarSeverity.Error);
+        }
+        finally
+        {
+            CacheButton.IsEnabled = true;
+        }
+    }
+
+    private async void ClearProxyCache_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not ProxyEntry proxy)
+        {
+            return;
+        }
+
+        if (proxy.IsOpen && SystemBrowserLauncher.IsSystemBrowser(proxy.OpenedProvider))
+        {
+            ShowMessage("Close this browser window before clearing its cache.", InfoBarSeverity.Warning);
+            return;
+        }
+
+        try
+        {
+            proxy.Status = "Clearing cache";
+            var cleanup = await _browserCache.ClearProxyCacheAsync(proxy);
+            await RefreshCacheSizeAsync();
+
+            if (cleanup.BytesBefore == 0)
+            {
+                proxy.Status = "No cache";
+                ShowMessage($"No Chrome/Edge/Firefox cache found for {proxy.ProxyDisplay}. Jancy is not touched.", InfoBarSeverity.Informational);
+                return;
+            }
+
+            proxy.Status = cleanup.FailedItems == 0 ? "Cache cleared" : "Cache partial";
+            var message = cleanup.FailedItems == 0
+                ? $"Cleared {BrowserCacheService.FormatBytes(cleanup.BytesBefore)} cache for {proxy.ProxyDisplay}."
+                : $"Cleared {BrowserCacheService.FormatBytes(cleanup.BytesBefore)} cache for {proxy.ProxyDisplay}. Skipped locked items: {cleanup.FailedItems}.";
+            ShowMessage(message, cleanup.FailedItems == 0 ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
+        }
+        catch (Exception ex)
+        {
+            proxy.Status = "Cache error";
+            ShowMessage(ex.Message, InfoBarSeverity.Error);
+        }
     }
 
     private void ClearUsed_Click(object sender, RoutedEventArgs e)
@@ -1203,6 +1301,10 @@ Jancy setup:
         proxy.SpeedGroup = savedState.SpeedGroup;
         var savedProvider = NormalizeBrowserProvider(savedState.BrowserProvider);
         proxy.BrowserProvider = savedProvider;
+        if (string.IsNullOrWhiteSpace(proxy.Email) && !string.IsNullOrWhiteSpace(savedState.Email))
+        {
+            proxy.Email = savedState.Email;
+        }
         proxy.CountryCode = savedState.CountryCode;
         proxy.Region = savedState.Region;
         proxy.City = savedState.City;
@@ -1237,7 +1339,10 @@ Jancy setup:
                 AutoUpdateEnabled = _autoUpdateEnabled,
                 GitRepositoryPath = _gitRepositoryPath,
                 LastUpdatePreviousHead = _lastUpdatePreviousHead,
-                SyncClickDelayMs = _syncClickDelayMs
+                SyncClickDelayMs = _syncClickDelayMs,
+                ShowChromeEmailButton = _showChromeEmailButton,
+                ShowEdgeEmailButton = _showEdgeEmailButton,
+                ShowFirefoxEmailButton = _showFirefoxEmailButton
             });
     }
 
@@ -1253,6 +1358,10 @@ Jancy setup:
         _autoUpdateEnabled = settings.AutoUpdateEnabled;
         SelectSyncClickDelay(settings.SyncClickDelayMs);
         UpdateSyncClickDelayFromSelection();
+        _showChromeEmailButton = settings.ShowChromeEmailButton;
+        _showEdgeEmailButton = settings.ShowEdgeEmailButton;
+        _showFirefoxEmailButton = settings.ShowFirefoxEmailButton;
+        ApplyBrowserEmailButtonSettings();
         _gitRepositoryPath = string.IsNullOrWhiteSpace(settings.GitRepositoryPath)
             ? GitAutoUpdater.DetectRepositoryPath()
             : settings.GitRepositoryPath;
@@ -1625,6 +1734,20 @@ Jancy setup:
             : $"{prefix}: {Proxies.Count} shown, {used} used, {copied} copied, {favorites} favorites, {fast}/{good}/{slow}/{dead} fast/good/slow/dead";
     }
 
+    private async Task RefreshCacheSizeAsync()
+    {
+        try
+        {
+            CacheButton.Content = "Cache: ...";
+            var size = await _browserCache.GetTotalCacheSizeAsync();
+            CacheButton.Content = $"Cache: {BrowserCacheService.FormatBytes(size)}";
+        }
+        catch
+        {
+            CacheButton.Content = "Cache: ?";
+        }
+    }
+
     private void SortProxiesBySpeed()
     {
         if (_activeList is null)
@@ -1637,6 +1760,28 @@ Jancy setup:
             .ThenBy(proxy => proxy.ResponseMs ?? int.MaxValue)
             .ThenBy(proxy => proxy.PingMs ?? int.MaxValue)
             .ThenBy(proxy => proxy.RowNumber)
+            .ToList();
+
+        _activeList.Items.Clear();
+        foreach (var proxy in sorted)
+        {
+            _activeList.Items.Add(proxy);
+        }
+
+        RefreshVisibleProxies();
+    }
+
+    private void SortProxiesByDocumentOrder()
+    {
+        if (_activeList is null)
+        {
+            return;
+        }
+
+        var sorted = _activeList.Items
+            .OrderBy(proxy => proxy.RowNumber)
+            .ThenBy(proxy => proxy.Host, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(proxy => proxy.Port)
             .ToList();
 
         _activeList.Items.Clear();
@@ -1745,6 +1890,14 @@ Jancy setup:
         _systemBrowserLauncher.SetChromeCtrlClickDelay(TimeSpan.FromMilliseconds(_syncClickDelayMs));
     }
 
+    private void ApplyBrowserEmailButtonSettings()
+    {
+        _systemBrowserLauncher.SetProfileEmailButtonOptions(
+            _showChromeEmailButton,
+            _showEdgeEmailButton,
+            _showFirefoxEmailButton);
+    }
+
     private async void Settings_Click(object sender, RoutedEventArgs e)
     {
         var endpointBox = new TextBox
@@ -1773,6 +1926,41 @@ Jancy setup:
         defaultBrowserBox.Items.Add(new ComboBoxItem { Content = "Edge", Tag = "edge" });
         defaultBrowserBox.Items.Add(new ComboBoxItem { Content = "Firefox", Tag = "firefox" });
         SelectComboBoxValue(defaultBrowserBox, _defaultBrowserProvider);
+        var emailButtonHeader = new TextBlock
+        {
+            Text = "Browser email button",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+        };
+        var chromeEmailButtonBox = new CheckBox
+        {
+            Content = "Chrome",
+            IsChecked = _showChromeEmailButton
+        };
+        var edgeEmailButtonBox = new CheckBox
+        {
+            Content = "Edge",
+            IsChecked = _showEdgeEmailButton
+        };
+        var firefoxEmailButtonBox = new CheckBox
+        {
+            Content = "Firefox signed extension",
+            IsChecked = _showFirefoxEmailButton
+        };
+        var emailButtonHint = new TextBlock
+        {
+            Text = "Chrome and Edge use a toolbar button. Firefox requires a Mozilla-signed toolbar extension. No page overlay or site DOM injection is added for this email control.",
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.82
+        };
+        var emailButtonPanel = new StackPanel
+        {
+            Spacing = 4
+        };
+        emailButtonPanel.Children.Add(emailButtonHeader);
+        emailButtonPanel.Children.Add(chromeEmailButtonBox);
+        emailButtonPanel.Children.Add(edgeEmailButtonBox);
+        emailButtonPanel.Children.Add(firefoxEmailButtonBox);
+        emailButtonPanel.Children.Add(emailButtonHint);
         var runUpdateButton = new Button { Content = "Run git update" };
         var rollbackButton = new Button { Content = "Rollback previous update" };
         var statusText = new TextBox
@@ -1874,6 +2062,7 @@ Jancy setup:
         panel.Children.Add(endpointBox);
         panel.Children.Add(installBridgeButton);
         panel.Children.Add(defaultBrowserBox);
+        panel.Children.Add(emailButtonPanel);
         panel.Children.Add(autoUpdateBox);
         panel.Children.Add(updateButtons);
         panel.Children.Add(statusText);
@@ -1909,6 +2098,10 @@ Jancy setup:
             : endpointBox.Text.Trim();
         _autoUpdateEnabled = autoUpdateBox.IsChecked == true;
         _defaultBrowserProvider = NormalizeBrowserProvider((defaultBrowserBox.SelectedItem as ComboBoxItem)?.Tag?.ToString());
+        _showChromeEmailButton = chromeEmailButtonBox.IsChecked == true;
+        _showEdgeEmailButton = edgeEmailButtonBox.IsChecked == true;
+        _showFirefoxEmailButton = firefoxEmailButtonBox.IsChecked == true;
+        ApplyBrowserEmailButtonSettings();
         _gitRepositoryPath = GetConfiguredRepositoryPath();
         SaveState();
     }

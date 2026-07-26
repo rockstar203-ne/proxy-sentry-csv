@@ -39,6 +39,7 @@ public sealed class AppStateStore
                 ResponseMs = proxy.ResponseMs,
                 SpeedGroup = proxy.SpeedGroup,
                 BrowserProvider = proxy.BrowserProvider,
+                Email = proxy.Email,
                 CountryCode = proxy.CountryCode,
                 Region = proxy.Region,
                 City = proxy.City
@@ -92,6 +93,9 @@ public sealed class AppStateStore
         public string GitRepositoryPath { get; set; } = "";
         public string LastUpdatePreviousHead { get; set; } = "";
         public int SyncClickDelayMs { get; set; }
+        public bool ShowChromeEmailButton { get; set; }
+        public bool ShowEdgeEmailButton { get; set; }
+        public bool ShowFirefoxEmailButton { get; set; }
     }
 
     public sealed class ProxyPersistedState
@@ -104,6 +108,7 @@ public sealed class AppStateStore
         public int? ResponseMs { get; set; }
         public string SpeedGroup { get; set; } = "Unchecked";
         public string BrowserProvider { get; set; } = "chrome";
+        public string Email { get; set; } = "";
         public string CountryCode { get; set; } = "";
         public string Region { get; set; } = "";
         public string City { get; set; } = "";

@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using System.IO.Compression;
+using System.Management;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
@@ -13,21 +14,37 @@ namespace ProxySentryCsv.Services;
 
 public sealed class SystemBrowserLauncher : IDisposable
 {
+    private const string ChromiumProfileEmailExtensionId = "gahffllgkafjhcnfdlddhkodfjdffaeb";
+    private const string ChromiumExtensionPublicKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtHDSpQLbRhLz8QnJ1iDvM9eSkmi87+EN+cjKdWlNuBig42SVx9lnouvs02xWcoE9BUIUvEyBZ3ZUyd8q0u0z9M7+7a91rudLmDgs6N8CY7YFjrltEXStjFxz8ixENRC+F8otnUqIL5Jx0vzU1OgFSdNb6HiDGZv+txfjPNvYZOlkJNRtPboCBXticOuAprNna6CRPGqN7aqu3ceBDhWVAAXVnKPo4aiUjYlSbQE8bBBeEg27J2qXT9Np9jMmzywnbTic18Ib2zRbkM26XWEBInXo8tnAobnUj7Xkdsbnn8vl+jnRe6INv81QAsYvEa4u9wZFzVHPWw0VO9EbddhrZQIDAQAB";
+    private const string FirefoxProfileEmailExtensionId = "proxy-sentry-profile-email@proxy-sentry-csv.local";
     private readonly string _profilesRoot;
+    private readonly string _extensionsRoot;
     private readonly BrowserForgeFingerprintService _fingerprints;
     private readonly object _gate = new();
     private readonly Dictionary<string, TrackedBrowser> _running = new(StringComparer.OrdinalIgnoreCase);
     private readonly ChromeSyncController _chromeSync = new();
+    private readonly ProfileEmailLocalServer _profileEmailServer = new();
+    private bool _showChromeEmailButton;
+    private bool _showEdgeEmailButton;
+    private bool _showFirefoxEmailButton;
 
     public SystemBrowserLauncher(string appDataPath, BrowserForgeFingerprintService fingerprints)
     {
         _profilesRoot = Path.Combine(appDataPath, "SystemBrowserProfilesClean");
+        _extensionsRoot = Path.Combine(appDataPath, "BrowserExtensions");
         _fingerprints = fingerprints;
     }
 
     public event Action<IReadOnlyList<string>>? ProfilesClosed;
 
     public bool IsChromeSyncRunning => _chromeSync.IsRunning;
+
+    public void SetProfileEmailButtonOptions(bool chrome, bool edge, bool firefox)
+    {
+        _showChromeEmailButton = chrome;
+        _showEdgeEmailButton = edge;
+        _showFirefoxEmailButton = firefox;
+    }
 
     public static bool IsSystemBrowser(string? provider)
     {
@@ -52,6 +69,9 @@ public sealed class SystemBrowserLauncher : IDisposable
         var browserVersion = GetBrowserVersion(executablePath);
         var browserMajor = browserVersion.Major;
         var fingerprint = await _fingerprints.GetOrCreateAsync(proxy, normalizedProvider, browserMajor, progress);
+        var windowLabel = GetWindowLabel(proxy);
+        var emailButtonEnabled = IsProfileEmailButtonEnabled(normalizedProvider);
+        var profileEmail = emailButtonEnabled && !string.IsNullOrWhiteSpace(proxy.Email) ? proxy.Email : "";
         ApplyFingerprintGeo(proxy, fingerprint);
         if (IsChromiumProvider(normalizedProvider))
         {
@@ -59,10 +79,15 @@ public sealed class SystemBrowserLauncher : IDisposable
         }
 
         var profilePath = GetProfilePath(normalizedProvider, proxy);
+        var extensionProfilePath = GetExtensionProfilePath(normalizedProvider, proxy);
         Directory.CreateDirectory(profilePath);
+        Directory.CreateDirectory(extensionProfilePath);
+        CloseExistingProfileProcesses(normalizedProvider, profilePath, progress);
         progress?.Invoke("Starting proxy relay");
         var relay = LocalProxyRelay.Start(proxy, progress);
         IDisposable? devToolsSession = null;
+        IDisposable? profileEmailResource = null;
+        Process? process = null;
 
         try
         {
@@ -83,10 +108,25 @@ public sealed class SystemBrowserLauncher : IDisposable
             if (IsChromiumProvider(normalizedProvider))
             {
                 debuggingPort = GetFreeLoopbackPort();
-                chromiumExtensionPath = normalizedProvider == "chrome"
-                    ? WriteChromiumBrowserForgeExtension(profilePath, fingerprint)
-                    : null;
-                WriteChromiumPreferences(profilePath, fingerprint);
+                var chromiumExtensionPaths = new List<string>();
+                if (normalizedProvider == "chrome")
+                {
+                    chromiumExtensionPaths.Add(WriteChromiumBrowserForgeExtension(extensionProfilePath, fingerprint));
+                }
+                if (!string.IsNullOrWhiteSpace(profileEmail))
+                {
+                    chromiumExtensionPaths.Add(WriteChromiumProfileEmailExtension(extensionProfilePath, profileEmail, windowLabel));
+                    progress?.Invoke("Profile email button enabled.");
+                }
+                else if (emailButtonEnabled)
+                {
+                    progress?.Invoke("CSV email is empty; profile email button skipped.");
+                }
+                chromiumExtensionPath = string.Join(",", chromiumExtensionPaths);
+                WriteChromiumPreferences(
+                    profilePath,
+                    fingerprint,
+                    !string.IsNullOrWhiteSpace(profileEmail) ? ChromiumProfileEmailExtensionId : "");
                 AddChromiumArguments(
                     startInfo,
                     profilePath,
@@ -97,11 +137,28 @@ public sealed class SystemBrowserLauncher : IDisposable
                     normalizedProvider,
                     debuggingPort.Value,
                     initialPlacement);
+                progress?.Invoke($"{GetBrowserDisplayName(normalizedProvider)} profile: {profilePath}");
+                if (!string.IsNullOrWhiteSpace(chromiumExtensionPath))
+                {
+                    progress?.Invoke($"{GetBrowserDisplayName(normalizedProvider)} extensions: {chromiumExtensionPath}");
+                }
             }
             else
             {
                 WriteFirefoxProfile(profilePath, relay.Port, fingerprint);
-                WriteFirefoxBrowserForgeExtension(profilePath, fingerprint);
+                if (!string.IsNullOrWhiteSpace(profileEmail))
+                {
+                    progress?.Invoke("Profile email button enabled.");
+                }
+                else if (emailButtonEnabled)
+                {
+                    progress?.Invoke("CSV email is empty; profile email button skipped.");
+                }
+                WriteFirefoxBrowserForgeExtension(profilePath, extensionProfilePath, fingerprint, windowLabel, "");
+                if (!string.IsNullOrWhiteSpace(profileEmail))
+                {
+                    InstallFirefoxProfileEmailExtension(profilePath, extensionProfilePath, progress);
+                }
                 startInfo.ArgumentList.Add("-no-remote");
                 startInfo.ArgumentList.Add("-profile");
                 startInfo.ArgumentList.Add(profilePath);
@@ -109,11 +166,30 @@ public sealed class SystemBrowserLauncher : IDisposable
                 startInfo.ArgumentList.Add(targetUrl);
             }
 
-            var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Could not start {GetBrowserDisplayName(normalizedProvider)}.");
+            process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Could not start {GetBrowserDisplayName(normalizedProvider)}.");
             process.EnableRaisingEvents = true;
+            if (normalizedProvider == "firefox" && !string.IsNullOrWhiteSpace(profileEmail))
+            {
+                try
+                {
+                    profileEmailResource = _profileEmailServer.Register(process.Id, profileEmail, windowLabel, progress);
+                    progress?.Invoke("Firefox profile email data registered.");
+                }
+                catch (Exception ex)
+                {
+                    progress?.Invoke($"Firefox profile email endpoint skipped: {ex.Message}");
+                }
+            }
             if (debuggingPort.HasValue)
             {
-                devToolsSession = await ApplyChromiumDevToolsOverridesAsync(debuggingPort.Value, targetUrl, fingerprint, normalizedProvider, progress);
+                devToolsSession = await ApplyChromiumDevToolsOverridesAsync(
+                    debuggingPort.Value,
+                    targetUrl,
+                    fingerprint,
+                    normalizedProvider,
+                    windowLabel,
+                    SplitChromiumExtensionPaths(chromiumExtensionPath),
+                    progress);
             }
             if (normalizedProvider != "firefox")
             {
@@ -121,11 +197,23 @@ public sealed class SystemBrowserLauncher : IDisposable
             }
             lock (_gate)
             {
-                _running[proxy.StableId] = new TrackedBrowser(process, normalizedProvider, relay, devToolsSession, debuggingPort);
+                _running[proxy.StableId] = new TrackedBrowser(process, normalizedProvider, relay, devToolsSession, debuggingPort, profileEmailResource);
             }
         }
         catch
         {
+            try
+            {
+                if (process is not null && !process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+            }
+
+            profileEmailResource?.Dispose();
             devToolsSession?.Dispose();
             relay.Dispose();
             throw;
@@ -254,9 +342,84 @@ public sealed class SystemBrowserLauncher : IDisposable
         }
         finally
         {
+            tracked.ProfileEmailResource?.Dispose();
             tracked.DevToolsSession?.Dispose();
             tracked.Relay.Dispose();
         }
+    }
+
+    private static void CloseExistingProfileProcesses(string provider, string profilePath, Action<string>? progress)
+    {
+        var processName = provider switch
+        {
+            "chrome" => "chrome.exe",
+            "edge" => "msedge.exe",
+            "firefox" => "firefox.exe",
+            _ => ""
+        };
+        if (string.IsNullOrWhiteSpace(processName))
+        {
+            return;
+        }
+
+        var normalizedProfilePath = NormalizeCommandLinePath(profilePath);
+        List<int> processIds = [];
+        try
+        {
+            using var searcher = new ManagementObjectSearcher($"SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = '{processName}'");
+            foreach (ManagementObject process in searcher.Get().Cast<ManagementObject>())
+            {
+                var commandLine = process["CommandLine"]?.ToString();
+                if (string.IsNullOrWhiteSpace(commandLine)
+                    || !NormalizeCommandLinePath(commandLine).Contains(normalizedProfilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (process["ProcessId"] is uint id)
+                {
+                    processIds.Add(unchecked((int)id));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            progress?.Invoke($"Could not inspect existing {GetBrowserDisplayName(provider)} profile windows: {ex.Message}");
+            return;
+        }
+
+        foreach (var processId in processIds.Distinct())
+        {
+            try
+            {
+                using var process = Process.GetProcessById(processId);
+                if (process.HasExited)
+                {
+                    continue;
+                }
+
+                progress?.Invoke($"Closing previous {GetBrowserDisplayName(provider)} profile window.");
+                if (process.CloseMainWindow() && process.WaitForExit(1200))
+                {
+                    continue;
+                }
+
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit(1000);
+                }
+            }
+            catch
+            {
+                // The profile process can exit between WMI lookup and close.
+            }
+        }
+    }
+
+    private static string NormalizeCommandLinePath(string value)
+    {
+        return value.Trim().Trim('"').Replace('/', '\\');
     }
 
     public void Dispose()
@@ -283,10 +446,13 @@ public sealed class SystemBrowserLauncher : IDisposable
             }
             finally
             {
+                tracked.ProfileEmailResource?.Dispose();
                 tracked.DevToolsSession?.Dispose();
                 tracked.Relay.Dispose();
             }
         }
+
+        _profileEmailServer.Dispose();
     }
 
     public async Task StartChromeSyncAsync(IReadOnlyList<ProxyEntry> proxies, Action<string>? progress = null, CancellationToken cancellationToken = default)
@@ -350,6 +516,17 @@ public sealed class SystemBrowserLauncher : IDisposable
         return NormalizeProvider(provider) is "chrome" or "edge";
     }
 
+    private bool IsProfileEmailButtonEnabled(string provider)
+    {
+        return NormalizeProvider(provider) switch
+        {
+            "chrome" => _showChromeEmailButton,
+            "edge" => _showEdgeEmailButton,
+            "firefox" => _showFirefoxEmailButton,
+            _ => false
+        };
+    }
+
     private static void AddChromiumArguments(
         ProcessStartInfo startInfo,
         string profilePath,
@@ -385,6 +562,7 @@ public sealed class SystemBrowserLauncher : IDisposable
         startInfo.ArgumentList.Add($"--remote-debugging-port={debuggingPort}");
         startInfo.ArgumentList.Add("--remote-debugging-address=127.0.0.1");
         startInfo.ArgumentList.Add("--remote-allow-origins=*");
+        startInfo.ArgumentList.Add("--enable-unsafe-extension-debugging");
         startInfo.ArgumentList.Add($"--lang={NormalizePrimaryLocale(fingerprint.Locale)}");
         startInfo.ArgumentList.Add($"--accept-lang={ToChromiumAcceptLanguage(fingerprint)}");
         startInfo.ArgumentList.Add($"--proxy-server=http://127.0.0.1:{relayPort}");
@@ -402,11 +580,6 @@ public sealed class SystemBrowserLauncher : IDisposable
         {
             startInfo.ArgumentList.Add($"--window-size={fingerprint.Screen.Width.Value},{fingerprint.Screen.Height.Value}");
         }
-        if (!string.IsNullOrWhiteSpace(extensionPath) && Directory.Exists(extensionPath))
-        {
-            startInfo.ArgumentList.Add($"--disable-extensions-except={extensionPath}");
-            startInfo.ArgumentList.Add($"--load-extension={extensionPath}");
-        }
         startInfo.ArgumentList.Add(targetUrl);
     }
 
@@ -417,7 +590,7 @@ public sealed class SystemBrowserLauncher : IDisposable
         proxy.City = fingerprint.City;
     }
 
-    private static void WriteChromiumPreferences(string profilePath, BrowserForgeFingerprint fingerprint)
+    private static void WriteChromiumPreferences(string profilePath, BrowserForgeFingerprint fingerprint, string pinnedExtensionId)
     {
         var defaultProfilePath = Path.Combine(profilePath, "Default");
         Directory.CreateDirectory(defaultProfilePath);
@@ -445,8 +618,28 @@ public sealed class SystemBrowserLauncher : IDisposable
         SetJsonValue(root, ["browser"], "has_seen_welcome_page", true);
         SetJsonValue(root, [], "credentials_enable_service", false);
         SetJsonValue(root, ["profile"], "password_manager_enabled", false);
+        PinChromiumExtension(root, pinnedExtensionId);
 
         File.WriteAllText(preferencesPath, root.ToJsonString(AppJsonOptions.Indented), Encoding.UTF8);
+    }
+
+    private static void PinChromiumExtension(JsonObject root, string extensionId)
+    {
+        if (string.IsNullOrWhiteSpace(extensionId))
+        {
+            return;
+        }
+
+        if (root["extensions"] is not JsonObject extensions)
+        {
+            extensions = [];
+            root["extensions"] = extensions;
+        }
+
+        var pinned = new JsonArray();
+        pinned.Add(extensionId.Trim());
+        extensions["pinned_extensions"] = pinned;
+        SetJsonValue(root, ["extensions"], "pinned_extension_migration", true);
     }
 
     private static void SetJsonValue(JsonObject root, string[] path, string propertyName, object? value)
@@ -495,16 +688,24 @@ public sealed class SystemBrowserLauncher : IDisposable
         string targetUrl,
         BrowserForgeFingerprint fingerprint,
         string provider,
+        string windowLabel,
+        IReadOnlyList<string> extensionPaths,
         Action<string>? progress)
     {
         ChromeDevToolsClient? client = null;
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await LoadChromiumExtensionsAsync(debuggingPort, extensionPaths, progress, timeout.Token);
             client = await ChromeDevToolsClient.ConnectAsync(debuggingPort, timeout.Token);
             await client.SendAsync("Page.enable", cancellationToken: timeout.Token);
             await client.SendAsync("Emulation.setTimezoneOverride", new { timezoneId = fingerprint.TimeZone }, timeout.Token);
             await client.SendAsync("Emulation.setLocaleOverride", new { locale = NormalizePrimaryLocale(fingerprint.Locale) }, timeout.Token);
+            if (!string.IsNullOrWhiteSpace(windowLabel))
+            {
+                await client.SendAsync("Page.addScriptToEvaluateOnNewDocument", new { source = BuildWindowTitleScript(windowLabel) }, timeout.Token);
+                await client.SendAsync("Runtime.evaluate", new { expression = BuildWindowTitleScript(windowLabel), awaitPromise = false }, timeout.Token);
+            }
             await client.SendAsync("Page.navigate", new { url = targetUrl }, timeout.Token);
             progress?.Invoke($"Chrome timezone applied: {fingerprint.TimeZone}, {fingerprint.Locale}.");
             var result = client;
@@ -516,6 +717,65 @@ public sealed class SystemBrowserLauncher : IDisposable
             client?.Dispose();
             progress?.Invoke($"Chrome override failed: {ex.Message}");
             return null;
+        }
+    }
+
+    private static async Task LoadChromiumExtensionsAsync(
+        int debuggingPort,
+        IReadOnlyList<string> extensionPaths,
+        Action<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (extensionPaths.Count == 0)
+        {
+            return;
+        }
+
+        using var browserClient = await ChromeDevToolsClient.ConnectBrowserAsync(debuggingPort, cancellationToken);
+        var loadedIds = new List<string>();
+        foreach (var extensionPath in extensionPaths)
+        {
+            if (!Directory.Exists(extensionPath))
+            {
+                progress?.Invoke($"Chromium extension path missing: {extensionPath}");
+                continue;
+            }
+
+            try
+            {
+                var result = await browserClient.SendAsync("Extensions.loadUnpacked", new { path = extensionPath }, cancellationToken);
+                var extensionId = result.TryGetProperty("id", out var idElement)
+                    ? idElement.GetString()
+                    : "";
+                if (!string.IsNullOrWhiteSpace(extensionId))
+                {
+                    loadedIds.Add(extensionId);
+                }
+                progress?.Invoke(string.IsNullOrWhiteSpace(extensionId)
+                    ? $"Chromium extension loaded: {Path.GetFileName(extensionPath)}"
+                    : $"Chromium extension loaded: {Path.GetFileName(extensionPath)} ({extensionId})");
+            }
+            catch (Exception ex)
+            {
+                progress?.Invoke($"Chromium extension load failed: {Path.GetFileName(extensionPath)} - {ex.Message}");
+            }
+        }
+
+        try
+        {
+            var result = await browserClient.SendAsync("Extensions.getExtensions", cancellationToken: cancellationToken);
+            var activeCount = result.TryGetProperty("extensions", out var extensions)
+                ? extensions.GetArrayLength()
+                : 0;
+            var loadedCount = loadedIds.Count(id => extensions.ValueKind == JsonValueKind.Array
+                && extensions.EnumerateArray().Any(extension =>
+                    extension.TryGetProperty("id", out var activeId)
+                    && string.Equals(activeId.GetString(), id, StringComparison.OrdinalIgnoreCase)));
+            progress?.Invoke($"Chromium extensions active: {loadedCount}/{extensionPaths.Count}.");
+        }
+        catch (Exception ex)
+        {
+            progress?.Invoke($"Chromium extension verification skipped: {ex.Message}");
         }
     }
 
@@ -751,21 +1011,43 @@ public sealed class SystemBrowserLauncher : IDisposable
         File.WriteAllText(Path.Combine(profilePath, "prefs.js"), prefsText, Encoding.UTF8);
     }
 
-    private static void WriteFirefoxBrowserForgeExtension(string profilePath, BrowserForgeFingerprint fingerprint)
+    private static void WriteFirefoxBrowserForgeExtension(string profilePath, string extensionProfilePath, BrowserForgeFingerprint fingerprint, string windowLabel, string profileEmail)
     {
         const string extensionId = "proxy-sentry-browserforge@local";
-        var sourcePath = Path.Combine(profilePath, "ProxySentryFirefoxBrowserForgeExtension");
         var extensionsPath = Path.Combine(profilePath, "extensions");
+        var legacySourcePath = Path.Combine(profilePath, "ProxySentryFirefoxBrowserForgeExtension");
+        var extensionPath = Path.Combine(extensionProfilePath, "ProxySentryFirefoxBrowserForgeExtension");
         var xpiPath = Path.Combine(extensionsPath, $"{extensionId}.xpi");
-        if (Directory.Exists(sourcePath))
+        if (Directory.Exists(legacySourcePath))
         {
-            Directory.Delete(sourcePath, recursive: true);
+            Directory.Delete(legacySourcePath, recursive: true);
+        }
+        if (Directory.Exists(extensionPath))
+        {
+            Directory.Delete(extensionPath, recursive: true);
+        }
+        if (File.Exists(xpiPath))
+        {
+            File.Delete(xpiPath);
         }
 
-        Directory.CreateDirectory(sourcePath);
         Directory.CreateDirectory(extensionsPath);
+        Directory.CreateDirectory(extensionPath);
 
-        File.WriteAllText(Path.Combine(sourcePath, "manifest.json"), """
+        var includeEmailPopup = !string.IsNullOrWhiteSpace(profileEmail);
+        var permissions = includeEmailPopup
+            ? "\"<all_urls>\", \"clipboardWrite\""
+            : "\"<all_urls>\"";
+        var browserAction = includeEmailPopup
+            ? """
+,
+  "browser_action": {
+    "default_title": "Profile email",
+    "default_popup": "profile-email.html"
+  }
+"""
+            : "";
+        File.WriteAllText(Path.Combine(extensionPath, "manifest.json"), $$"""
 {
   "manifest_version": 2,
   "name": "Proxy Sentry BrowserForge",
@@ -777,7 +1059,7 @@ public sealed class SystemBrowserLauncher : IDisposable
       "strict_min_version": "91.0"
     }
   },
-  "permissions": ["<all_urls>"],
+  "permissions": [{{permissions}}],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
@@ -785,11 +1067,12 @@ public sealed class SystemBrowserLauncher : IDisposable
       "run_at": "document_start",
       "all_frames": true
     }
-  ]
+  ]{{browserAction}}
 }
 """, Encoding.UTF8);
 
         var payload = JsonSerializer.Serialize(fingerprint);
+        var titleScript = BuildWindowTitleScript(windowLabel);
         var script = $$"""
 (() => {
   const fp = {{payload}};
@@ -811,6 +1094,8 @@ public sealed class SystemBrowserLauncher : IDisposable
       defineGetter(nav, "languages", languages);
       defineGetter(nav, "webdriver", false);
     } catch (_) {}
+
+    {{titleScript}}
 
     const NativeDate = Date;
     const NativeDateTimeFormat = Intl && Intl.DateTimeFormat;
@@ -897,13 +1182,222 @@ public sealed class SystemBrowserLauncher : IDisposable
   } catch (_) {}
 })();
 """;
-        File.WriteAllText(Path.Combine(sourcePath, "inject.js"), script, Encoding.UTF8);
-
-        if (File.Exists(xpiPath))
+        File.WriteAllText(Path.Combine(extensionPath, "inject.js"), script, Encoding.UTF8);
+        if (includeEmailPopup)
         {
-            File.Delete(xpiPath);
+            WriteProfileEmailPopupFiles(extensionPath, profileEmail, windowLabel);
         }
-        ZipFile.CreateFromDirectory(sourcePath, xpiPath, CompressionLevel.Fastest, includeBaseDirectory: false);
+
+        ZipFile.CreateFromDirectory(extensionPath, xpiPath, CompressionLevel.Fastest, includeBaseDirectory: false);
+    }
+
+    private void InstallFirefoxProfileEmailExtension(string profilePath, string extensionProfilePath, Action<string>? progress)
+    {
+        var sourcePath = Path.Combine(_extensionsRoot, "firefox", "ProfileEmailExtensionSource");
+        var signedPath = FindSignedFirefoxProfileEmailExtensionXpi(extensionProfilePath);
+        WriteFirefoxProfileEmailExtensionSource(sourcePath);
+        WriteUnsignedFirefoxProfileEmailExtensionPackage(sourcePath);
+
+        if (string.IsNullOrWhiteSpace(signedPath))
+        {
+            var expectedPath = Path.Combine(_extensionsRoot, "firefox", "Signed", "proxy-sentry-profile-email.xpi");
+            progress?.Invoke($"Firefox signed email extension is missing. Sign source: {sourcePath}");
+            progress?.Invoke($"Place signed XPI here: {expectedPath}");
+            return;
+        }
+
+        var extensionsPath = Path.Combine(profilePath, "extensions");
+        Directory.CreateDirectory(extensionsPath);
+        var targetPath = Path.Combine(extensionsPath, $"{FirefoxProfileEmailExtensionId}.xpi");
+        File.Copy(signedPath, targetPath, overwrite: true);
+        progress?.Invoke($"Firefox signed email extension installed: {targetPath}");
+    }
+
+    private string? FindSignedFirefoxProfileEmailExtensionXpi(string extensionProfilePath)
+    {
+        var candidates = new[]
+        {
+            Path.Combine(_extensionsRoot, "firefox", "Signed", "proxy-sentry-profile-email.xpi"),
+            Path.Combine(_extensionsRoot, "firefox", "Signed", $"{FirefoxProfileEmailExtensionId}.xpi"),
+            Path.Combine(extensionProfilePath, "Signed", "proxy-sentry-profile-email.xpi"),
+            Path.Combine(AppContext.BaseDirectory, "FirefoxExtensions", "proxy-sentry-profile-email.xpi"),
+            Path.Combine(AppContext.BaseDirectory, "FirefoxExtensions", $"{FirefoxProfileEmailExtensionId}.xpi")
+        };
+
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
+    private static void WriteFirefoxProfileEmailExtensionSource(string extensionPath)
+    {
+        if (Directory.Exists(extensionPath))
+        {
+            Directory.Delete(extensionPath, recursive: true);
+        }
+
+        Directory.CreateDirectory(extensionPath);
+        File.WriteAllText(Path.Combine(extensionPath, "manifest.json"), $$"""
+{
+  "manifest_version": 2,
+  "name": "Proxy Sentry Profile Email",
+  "version": "1.0.0",
+  "description": "Shows the CSV email assigned to this Proxy Sentry Firefox profile.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "{{FirefoxProfileEmailExtensionId}}",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  },
+  "permissions": [
+    "clipboardWrite",
+    "http://127.0.0.1:{{ProfileEmailLocalServer.Port}}/*"
+  ],
+  "browser_action": {
+    "default_title": "Profile email",
+    "default_popup": "profile-email.html"
+  }
+}
+""", Encoding.UTF8);
+
+        File.WriteAllText(Path.Combine(extensionPath, "profile-email.html"), """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    html, body {
+      margin: 0;
+      background: #1f1f1f;
+      color: #f2f2f2;
+      font-family: Segoe UI, Arial, sans-serif;
+      font-size: 13px;
+    }
+    body {
+      width: 250px;
+      padding: 12px;
+    }
+    .email {
+      background: #2c2c2c;
+      border: 1px solid #4a4a4a;
+      border-radius: 6px;
+      cursor: pointer;
+      line-height: 1.35;
+      margin-bottom: 10px;
+      overflow-wrap: anywhere;
+      padding: 9px;
+      user-select: text;
+    }
+    button {
+      background: #0d6efd;
+      border: 0;
+      border-radius: 6px;
+      color: #fff;
+      cursor: pointer;
+      font: inherit;
+      padding: 8px 10px;
+      width: 100%;
+    }
+    button:disabled {
+      background: #555;
+      cursor: default;
+    }
+    .status {
+      color: #8fd19e;
+      font-size: 12px;
+      min-height: 16px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div id="email" class="email" title="Click to copy">Loading...</div>
+  <button id="copy" type="button" disabled>Copy email</button>
+  <div id="status" class="status"></div>
+  <script src="profile-email.js"></script>
+</body>
+</html>
+""", Encoding.UTF8);
+
+        File.WriteAllText(Path.Combine(extensionPath, "profile-email.js"), $$"""
+const endpoint = "http://127.0.0.1:{{ProfileEmailLocalServer.Port}}/profile-email";
+const emailElement = document.getElementById("email");
+const copyButton = document.getElementById("copy");
+const statusElement = document.getElementById("status");
+let profileEmail = "";
+
+async function loadEmail() {
+  try {
+    const response = await fetch(endpoint, { cache: "no-store" });
+    const payload = await response.json();
+    if (!payload || !payload.success || !payload.email) {
+      emailElement.textContent = payload && payload.message ? payload.message : "No email for this profile";
+      copyButton.disabled = true;
+      return;
+    }
+
+    profileEmail = String(payload.email);
+    document.title = payload.label ? "Profile email - " + payload.label : "Profile email";
+    emailElement.textContent = profileEmail;
+    copyButton.disabled = false;
+    statusElement.textContent = "Click email or Copy";
+  } catch (error) {
+    emailElement.textContent = "Proxy Sentry CSV is not reachable";
+    copyButton.disabled = true;
+  }
+}
+
+async function copyEmail() {
+  if (!profileEmail) {
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(profileEmail);
+  } catch (_) {
+    const textarea = document.createElement("textarea");
+    textarea.value = profileEmail;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+
+  statusElement.textContent = "Copied";
+}
+
+copyButton.addEventListener("click", copyEmail);
+emailElement.addEventListener("click", copyEmail);
+loadEmail();
+""", Encoding.UTF8);
+
+        File.WriteAllText(Path.Combine(extensionPath, "README-signing.txt"), $"""
+Proxy Sentry Profile Email Firefox extension
+
+This extension must be signed by Mozilla before stable Firefox will load it.
+Sign this source directory as an unlisted/self-distributed add-on, then place the signed XPI at:
+
+{Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(extensionPath)) ?? extensionPath, "Signed", "proxy-sentry-profile-email.xpi")}
+
+The extension only adds a toolbar popup. It does not inject scripts into websites.
+The popup reads profile email from Proxy Sentry CSV at:
+http://127.0.0.1:{ProfileEmailLocalServer.Port}/profile-email
+""", Encoding.UTF8);
+    }
+
+    private static void WriteUnsignedFirefoxProfileEmailExtensionPackage(string extensionPath)
+    {
+        var packagePath = Path.Combine(Path.GetDirectoryName(extensionPath) ?? extensionPath, "proxy-sentry-profile-email-unsigned.xpi");
+        if (File.Exists(packagePath))
+        {
+            File.Delete(packagePath);
+        }
+
+        ZipFile.CreateFromDirectory(extensionPath, packagePath, CompressionLevel.Fastest, includeBaseDirectory: false);
     }
 
     private static string WriteChromiumBrowserForgeExtension(string profilePath, BrowserForgeFingerprint fingerprint)
@@ -1497,9 +1991,154 @@ try {
         return extensionPath;
     }
 
+    private static string WriteChromiumProfileEmailExtension(string profilePath, string profileEmail, string windowLabel)
+    {
+        var extensionPath = Path.Combine(profilePath, "ProxySentryProfileEmailExtension");
+        Directory.CreateDirectory(extensionPath);
+        File.WriteAllText(Path.Combine(extensionPath, "manifest.json"), $$"""
+{
+  "manifest_version": 3,
+  "name": "Proxy Sentry Profile Email",
+  "version": "1.0.0",
+  "description": "Shows the CSV email assigned to this Proxy Sentry profile.",
+  "key": "{{ChromiumExtensionPublicKey}}",
+  "permissions": ["clipboardWrite"],
+  "action": {
+    "default_title": "Profile email",
+    "default_popup": "profile-email.html"
+  }
+}
+""", Encoding.UTF8);
+        WriteProfileEmailPopupFiles(extensionPath, profileEmail, windowLabel);
+        return extensionPath;
+    }
+
+    private static void WriteProfileEmailPopupFiles(string extensionPath, string profileEmail, string windowLabel)
+    {
+        var email = profileEmail.Trim();
+        var label = string.IsNullOrWhiteSpace(windowLabel)
+            ? "Profile email"
+            : windowLabel.Trim();
+
+        File.WriteAllText(Path.Combine(extensionPath, "profile-email.html"), """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    html, body {
+      margin: 0;
+      background: #1f1f1f;
+      color: #f2f2f2;
+      font-family: Segoe UI, Arial, sans-serif;
+      font-size: 13px;
+    }
+    body {
+      width: 250px;
+      padding: 12px;
+    }
+    .email {
+      background: #2c2c2c;
+      border: 1px solid #4a4a4a;
+      border-radius: 6px;
+      cursor: pointer;
+      line-height: 1.35;
+      margin-bottom: 10px;
+      overflow-wrap: anywhere;
+      padding: 9px;
+      user-select: text;
+    }
+    button {
+      background: #0d6efd;
+      border: 0;
+      border-radius: 6px;
+      color: #fff;
+      cursor: pointer;
+      font: inherit;
+      padding: 8px 10px;
+      width: 100%;
+    }
+    button:disabled {
+      background: #555;
+      cursor: default;
+    }
+    .status {
+      color: #8fd19e;
+      font-size: 12px;
+      min-height: 16px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div id="email" class="email" title="Click to copy"></div>
+  <button id="copy" type="button">Copy email</button>
+  <div id="status" class="status"></div>
+  <script src="profile-email.js"></script>
+</body>
+</html>
+""", Encoding.UTF8);
+
+        var script = $$"""
+const profileEmail = {{JsonSerializer.Serialize(email)}};
+const profileTitle = {{JsonSerializer.Serialize(label)}};
+
+const emailElement = document.getElementById("email");
+const copyButton = document.getElementById("copy");
+const statusElement = document.getElementById("status");
+
+document.title = profileTitle || "Profile email";
+emailElement.textContent = profileEmail || "No email in CSV";
+copyButton.disabled = !profileEmail;
+
+async function copyEmail() {
+  if (!profileEmail) {
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(profileEmail);
+  } catch (_) {
+    const textarea = document.createElement("textarea");
+    textarea.value = profileEmail;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+
+  statusElement.textContent = "Copied";
+}
+
+copyButton.addEventListener("click", copyEmail);
+emailElement.addEventListener("click", copyEmail);
+""";
+        File.WriteAllText(Path.Combine(extensionPath, "profile-email.js"), script, Encoding.UTF8);
+    }
+
     private string GetProfilePath(string provider, ProxyEntry proxy)
     {
         return Path.Combine(_profilesRoot, provider, $"proxy-{proxy.ProfileKey}");
+    }
+
+    private string GetExtensionProfilePath(string provider, ProxyEntry proxy)
+    {
+        return Path.Combine(_extensionsRoot, provider, $"proxy-{proxy.ProfileKey}");
+    }
+
+    private static IReadOnlyList<string> SplitChromiumExtensionPaths(string? extensionPath)
+    {
+        if (string.IsNullOrWhiteSpace(extensionPath))
+        {
+            return [];
+        }
+
+        return extensionPath
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
     }
 
     private static Task<string> ResolveBrowserExecutableAsync(string provider, Action<string>? progress)
@@ -1663,6 +2302,74 @@ try {
         return JsonSerializer.Serialize(value);
     }
 
+    private static string GetWindowLabel(ProxyEntry proxy)
+    {
+        var label = (proxy.DisplayName ?? "").Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            return "";
+        }
+
+        return label.Length <= 80 ? label : label[..80];
+    }
+
+    private static string BuildWindowTitleScript(string windowLabel)
+    {
+        var label = windowLabel.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            return "";
+        }
+
+        if (label.Length > 80)
+        {
+            label = label[..80];
+        }
+
+        var labelJson = Json(label);
+        return $$"""
+(() => {
+  try {
+    const label = {{labelJson}};
+    if (!label || window.__proxySentryWindowTitleInstalled) {
+      return;
+    }
+    window.__proxySentryWindowTitleInstalled = true;
+    const prefix = "[" + label + "] ";
+    const stripPrefix = value => String(value || "").replace(/^\[[^\]]{1,80}\]\s+/, "");
+    const apply = () => {
+      try {
+        const current = document.title || "";
+        if (current.startsWith(prefix)) {
+          return;
+        }
+        const clean = stripPrefix(current);
+        document.title = prefix + clean;
+      } catch (_) {}
+    };
+    const start = () => {
+      apply();
+      try {
+        const title = document.querySelector("title");
+        const target = title || document.documentElement || document;
+        const observer = new MutationObserver(apply);
+        observer.observe(target, { childList: true, subtree: true, characterData: true });
+      } catch (_) {}
+      window.addEventListener("pageshow", apply, true);
+      window.addEventListener("focus", apply, true);
+      setInterval(apply, 1200);
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", start, { once: true });
+      apply();
+    } else {
+      start();
+    }
+  } catch (_) {}
+})();
+""";
+    }
+
     private static string NormalizePrimaryLocale(string? locale)
     {
         return string.IsNullOrWhiteSpace(locale) ? "en-US" : locale.Trim();
@@ -1723,13 +2430,20 @@ try {
 
         if (tracked is not null)
         {
+            tracked.ProfileEmailResource?.Dispose();
             tracked.DevToolsSession?.Dispose();
             tracked.Relay.Dispose();
             ProfilesClosed?.Invoke([stableId]);
         }
     }
 
-    private sealed record TrackedBrowser(Process Process, string Provider, LocalProxyRelay Relay, IDisposable? DevToolsSession, int? DebuggingPort);
+    private sealed record TrackedBrowser(
+        Process Process,
+        string Provider,
+        LocalProxyRelay Relay,
+        IDisposable? DevToolsSession,
+        int? DebuggingPort,
+        IDisposable? ProfileEmailResource);
 
     private sealed record BrowserVersion(int? Major, string? FullVersion);
 
