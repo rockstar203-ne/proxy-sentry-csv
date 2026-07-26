@@ -108,11 +108,8 @@ public sealed class SystemBrowserLauncher : IDisposable
             if (IsChromiumProvider(normalizedProvider))
             {
                 debuggingPort = GetFreeLoopbackPort();
+                RemoveChromiumBrowserForgeExtension(profilePath, extensionProfilePath, progress);
                 var chromiumExtensionPaths = new List<string>();
-                if (normalizedProvider == "chrome")
-                {
-                    chromiumExtensionPaths.Add(WriteChromiumBrowserForgeExtension(extensionProfilePath, fingerprint));
-                }
                 if (!string.IsNullOrWhiteSpace(profileEmail))
                 {
                     chromiumExtensionPaths.Add(WriteChromiumProfileEmailExtension(extensionProfilePath, profileEmail, windowLabel));
@@ -562,7 +559,10 @@ public sealed class SystemBrowserLauncher : IDisposable
         startInfo.ArgumentList.Add($"--remote-debugging-port={debuggingPort}");
         startInfo.ArgumentList.Add("--remote-debugging-address=127.0.0.1");
         startInfo.ArgumentList.Add("--remote-allow-origins=*");
-        startInfo.ArgumentList.Add("--enable-unsafe-extension-debugging");
+        if (!string.IsNullOrWhiteSpace(extensionPath))
+        {
+            startInfo.ArgumentList.Add("--enable-unsafe-extension-debugging");
+        }
         startInfo.ArgumentList.Add($"--lang={NormalizePrimaryLocale(fingerprint.Locale)}");
         startInfo.ArgumentList.Add($"--accept-lang={ToChromiumAcceptLanguage(fingerprint)}");
         startInfo.ArgumentList.Add($"--proxy-server=http://127.0.0.1:{relayPort}");
@@ -621,6 +621,132 @@ public sealed class SystemBrowserLauncher : IDisposable
         PinChromiumExtension(root, pinnedExtensionId);
 
         File.WriteAllText(preferencesPath, root.ToJsonString(AppJsonOptions.Indented), Encoding.UTF8);
+    }
+
+    private static void RemoveChromiumBrowserForgeExtension(string profilePath, string extensionProfilePath, Action<string>? progress)
+    {
+        var removed = false;
+        removed |= DeleteDirectoryIfExists(Path.Combine(extensionProfilePath, "ProxySentryBrowserForgeExtension"));
+        removed |= DeleteDirectoryIfExists(Path.Combine(profilePath, "ProxySentryBrowserForgeExtension"));
+
+        var defaultProfilePath = Path.Combine(profilePath, "Default");
+        HashSet<string> removedIds = [];
+        removed |= RemoveChromiumBrowserForgeExtensionState(Path.Combine(defaultProfilePath, "Preferences"), removedIds);
+        removed |= RemoveChromiumBrowserForgeExtensionState(Path.Combine(defaultProfilePath, "Secure Preferences"), removedIds);
+        foreach (var extensionId in removedIds)
+        {
+            removed |= DeleteDirectoryIfExists(Path.Combine(defaultProfilePath, "Extensions", extensionId));
+            removed |= DeleteDirectoryIfExists(Path.Combine(defaultProfilePath, "Local Extension Settings", extensionId));
+            removed |= DeleteDirectoryIfExists(Path.Combine(defaultProfilePath, "Sync Extension Settings", extensionId));
+        }
+
+        if (removed)
+        {
+            progress?.Invoke("Removed old Chrome BrowserForge page patching extension from this profile.");
+        }
+    }
+
+    private static bool RemoveChromiumBrowserForgeExtensionState(string preferencesPath, HashSet<string> removedIds)
+    {
+        if (!File.Exists(preferencesPath))
+        {
+            return false;
+        }
+
+        JsonObject root;
+        try
+        {
+            root = JsonNode.Parse(File.ReadAllText(preferencesPath)) as JsonObject ?? [];
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (root["extensions"] is not JsonObject extensions)
+        {
+            return false;
+        }
+
+        var removed = false;
+        if (extensions["settings"] is JsonObject settings)
+        {
+            foreach (var item in settings.ToList())
+            {
+                if (IsChromiumBrowserForgeExtensionState(item.Value))
+                {
+                    removedIds.Add(item.Key);
+                    settings.Remove(item.Key);
+                    removed = true;
+                }
+            }
+        }
+
+        foreach (var sectionName in new[] { "commands", "toolbar" })
+        {
+            if (extensions[sectionName] is not JsonObject section)
+            {
+                continue;
+            }
+
+            foreach (var extensionId in removedIds.ToList())
+            {
+                if (section.Remove(extensionId))
+                {
+                    removed = true;
+                }
+            }
+        }
+
+        if (extensions["pinned_extensions"] is JsonArray pinned)
+        {
+            for (var index = pinned.Count - 1; index >= 0; index--)
+            {
+                var value = pinned[index]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(value) && removedIds.Contains(value))
+                {
+                    pinned.RemoveAt(index);
+                    removed = true;
+                }
+            }
+        }
+
+        if (removed)
+        {
+            File.WriteAllText(preferencesPath, root.ToJsonString(AppJsonOptions.Indented), Encoding.UTF8);
+        }
+
+        return removed;
+    }
+
+    private static bool IsChromiumBrowserForgeExtensionState(JsonNode? node)
+    {
+        if (node is null)
+        {
+            return false;
+        }
+
+        var text = node.ToJsonString();
+        return text.Contains("Proxy Sentry BrowserForge", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("ProxySentryBrowserForgeExtension", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool DeleteDirectoryIfExists(string path)
+    {
+        try
+        {
+            if (!Directory.Exists(path))
+            {
+                return false;
+            }
+
+            Directory.Delete(path, recursive: true);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static void PinChromiumExtension(JsonObject root, string extensionId)
