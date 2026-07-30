@@ -72,6 +72,7 @@ public sealed partial class MainWindow : Window
         var hwnd = WindowNative.GetWindowHandle(this);
         InitializeWithWindow.Initialize(picker, hwnd);
         picker.FileTypeFilter.Add(".csv");
+        picker.FileTypeFilter.Add(".txt");
 
         var files = await picker.PickMultipleFilesAsync();
         if (files.Count == 0)
@@ -715,7 +716,7 @@ public sealed partial class MainWindow : Window
     {
         if (list is null)
         {
-            ShowMessage("Select a CSV list to remove.", InfoBarSeverity.Warning);
+            ShowMessage("Select a proxy list to remove.", InfoBarSeverity.Warning);
             return;
         }
 
@@ -1013,7 +1014,7 @@ Jancy setup:
     {
         if (Proxies.Count == 0)
         {
-            ShowMessage("Load a CSV before checking proxies.", InfoBarSeverity.Warning);
+            ShowMessage("Load a proxy list before checking proxies.", InfoBarSeverity.Warning);
             return;
         }
 
@@ -1246,7 +1247,7 @@ Jancy setup:
                     RefreshVisibleProxies();
                 }
 
-                ShowMessage($"CSV already added: {Path.GetFileName(path)}.", InfoBarSeverity.Informational);
+                ShowMessage($"Proxy list already added: {Path.GetFileName(path)}.", InfoBarSeverity.Informational);
                 return;
             }
 
@@ -1733,7 +1734,7 @@ Jancy setup:
         var dead = Proxies.Count(proxy => proxy.SpeedGroup == "Dead");
         var prefix = fileName ?? _activeList?.Name ?? "Loaded";
         SummaryText.Text = Proxies.Count == 0
-            ? "No CSV loaded"
+            ? "No list loaded"
             : $"{prefix}: {Proxies.Count} shown, {used} used, {copied} copied, {favorites} favorites, {fast}/{good}/{slow}/{dead} fast/good/slow/dead";
     }
 

@@ -16,7 +16,7 @@ public static class CsvProxyLoader
         var proxyIndex = headers.FindIndex(header => string.Equals(header.Trim().TrimStart('\uFEFF'), "Proxy", StringComparison.OrdinalIgnoreCase));
         if (proxyIndex < 0)
         {
-            throw new InvalidOperationException("CSV does not contain a Proxy column.");
+            return LoadPlainTextProxyList(lines);
         }
 
         var nameIndex = FindHeader(headers, "Name");
@@ -39,7 +39,7 @@ public static class CsvProxyLoader
                 continue;
             }
 
-            var rawProxy = fields[proxyIndex].Trim();
+            var rawProxy = NormalizeField(fields[proxyIndex]);
             if (string.IsNullOrWhiteSpace(rawProxy))
             {
                 continue;
@@ -65,10 +65,35 @@ public static class CsvProxyLoader
         return proxies;
     }
 
+    private static IReadOnlyList<ProxyEntry> LoadPlainTextProxyList(IReadOnlyList<string> lines)
+    {
+        var proxies = new List<ProxyEntry>();
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var rawProxy = NormalizeField(lines[i]);
+            if (string.IsNullOrWhiteSpace(rawProxy) || rawProxy.StartsWith('#'))
+            {
+                continue;
+            }
+
+            if (TryParseProxy(rawProxy, i + 1, out var proxy))
+            {
+                proxies.Add(proxy);
+            }
+        }
+
+        if (proxies.Count == 0)
+        {
+            throw new InvalidOperationException("Proxy list does not contain supported proxy rows.");
+        }
+
+        return proxies;
+    }
+
     private static bool TryParseProxy(string rawProxy, int rowNumber, out ProxyEntry proxy)
     {
         proxy = new ProxyEntry();
-        rawProxy = rawProxy.Trim();
+        rawProxy = NormalizeField(rawProxy);
 
         if (TryParseUriProxy(rawProxy, rowNumber, out proxy))
         {
@@ -84,7 +109,7 @@ public static class CsvProxyLoader
 
         if (parts.Length >= 5 && LooksLikeScheme(parts[0]))
         {
-            scheme = parts[0].Trim();
+            scheme = NormalizeScheme(parts[0]);
             host = parts[1].Trim().TrimStart('/');
             portText = parts[2].Trim();
             username = parts[3].Trim();
@@ -100,7 +125,7 @@ public static class CsvProxyLoader
         }
         else if (parts.Length == 3 && LooksLikeScheme(parts[0]))
         {
-            scheme = parts[0].Trim();
+            scheme = NormalizeScheme(parts[0]);
             host = parts[1].Trim().TrimStart('/');
             portText = parts[2].Trim();
         }
@@ -123,7 +148,7 @@ public static class CsvProxyLoader
         proxy = new ProxyEntry
         {
             RowNumber = rowNumber,
-            Scheme = scheme,
+            Scheme = NormalizeScheme(scheme),
             Host = host,
             Port = port,
             Username = username,
@@ -157,7 +182,7 @@ public static class CsvProxyLoader
         proxy = new ProxyEntry
         {
             RowNumber = rowNumber,
-            Scheme = uri.Scheme,
+            Scheme = NormalizeScheme(uri.Scheme),
             Host = uri.Host,
             Port = uri.Port,
             Username = username,
@@ -170,8 +195,20 @@ public static class CsvProxyLoader
     private static bool LooksLikeScheme(string value)
     {
         return value.Equals("http", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("httpa", StringComparison.OrdinalIgnoreCase)
             || value.Equals("https", StringComparison.OrdinalIgnoreCase)
             || value.Equals("socks5", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeScheme(string value)
+    {
+        var scheme = value.Trim().ToLowerInvariant();
+        return scheme == "httpa" ? "http" : scheme;
+    }
+
+    private static string NormalizeField(string value)
+    {
+        return value.Trim().TrimStart('\uFEFF');
     }
 
     private static List<string> ParseLine(string line)
@@ -231,6 +268,6 @@ public static class CsvProxyLoader
 
     private static string GetField(IReadOnlyList<string> fields, int index)
     {
-        return index >= 0 && index < fields.Count ? fields[index].Trim() : "";
+        return index >= 0 && index < fields.Count ? NormalizeField(fields[index]) : "";
     }
 }

@@ -820,27 +820,37 @@ public sealed class SystemBrowserLauncher : IDisposable
         Action<string>? progress)
     {
         ChromeDevToolsClient? client = null;
+        CancellationTokenSource? runtime = null;
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             await LoadChromiumExtensionsAsync(debuggingPort, extensionPaths, progress, timeout.Token);
             client = await ChromeDevToolsClient.ConnectBrowserAsync(debuggingPort, timeout.Token);
+            var devToolsClient = client;
+            runtime = new CancellationTokenSource();
+            var runtimeSession = runtime;
             var targetSessions = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var appliedSessions = new ConcurrentDictionary<string, Task>(StringComparer.OrdinalIgnoreCase);
 
-            Task ApplySessionAsync(string sessionId, string targetType, bool resumeWhenReady)
+            Task ApplySessionAsync(string sessionId, string targetType, bool resumeWhenReady, CancellationToken cancellationToken)
             {
                 return appliedSessions.GetOrAdd(sessionId, _ => Task.Run(async () =>
                 {
-                    await ApplyChromiumOverridesToSessionAsync(client, sessionId, targetType, fingerprint, windowLabel, timeout.Token);
-                    if (resumeWhenReady)
+                    try
                     {
-                        await TrySendCdpCommandAsync(client, "Runtime.runIfWaitingForDebugger", null, sessionId, null, timeout.Token);
+                        await ApplyChromiumOverridesToSessionAsync(devToolsClient, sessionId, targetType, fingerprint, windowLabel, cancellationToken);
                     }
-                }, timeout.Token));
+                    finally
+                    {
+                        if (resumeWhenReady)
+                        {
+                            await TrySendCdpCommandAsync(devToolsClient, "Runtime.runIfWaitingForDebugger", null, sessionId, null, CancellationToken.None);
+                        }
+                    }
+                }, CancellationToken.None));
             }
 
-            client.EventReceived += (method, root) =>
+            devToolsClient.EventReceived += (method, root) =>
             {
                 if (!string.Equals(method, "Target.attachedToTarget", StringComparison.Ordinal)
                     || !root.TryGetProperty("params", out var parameters)
@@ -852,24 +862,33 @@ public sealed class SystemBrowserLauncher : IDisposable
 
                 var sessionId = sessionIdElement.GetString();
                 var target = ReadChromiumTargetInfo(targetInfo);
-                if (string.IsNullOrWhiteSpace(sessionId)
-                    || string.IsNullOrWhiteSpace(target.TargetId)
-                    || !IsChromiumOverrideTarget(target.Type))
+                if (string.IsNullOrWhiteSpace(sessionId))
                 {
                     return;
                 }
 
-                targetSessions[target.TargetId] = sessionId!;
-                _ = ApplySessionAsync(sessionId!, target.Type, resumeWhenReady: true);
+                if (!string.IsNullOrWhiteSpace(target.TargetId))
+                {
+                    targetSessions[target.TargetId] = sessionId!;
+                }
+
+                if (IsChromiumOverrideTarget(target.Type))
+                {
+                    _ = ApplySessionAsync(sessionId!, target.Type, resumeWhenReady: true, runtimeSession.Token);
+                }
+                else
+                {
+                    _ = ResumeChromiumTargetAsync(devToolsClient, sessionId!, runtimeSession.Token);
+                }
             };
 
-            await client.SendAsync("Target.setDiscoverTargets", new { discover = true }, timeout.Token);
-            await client.SendAsync(
+            await devToolsClient.SendAsync("Target.setDiscoverTargets", new { discover = true }, timeout.Token);
+            await devToolsClient.SendAsync(
                 "Target.setAutoAttach",
                 new { autoAttach = true, waitForDebuggerOnStart = true, flatten = true },
                 timeout.Token);
 
-            var targetsResult = await client.SendAsync("Target.getTargets", cancellationToken: timeout.Token);
+            var targetsResult = await devToolsClient.SendAsync("Target.getTargets", cancellationToken: timeout.Token);
             var targets = ReadChromiumTargets(targetsResult);
             foreach (var target in targets.Where(target => IsChromiumOverrideTarget(target.Type)))
             {
@@ -880,7 +899,7 @@ public sealed class SystemBrowserLauncher : IDisposable
 
                 try
                 {
-                    var attachResult = await client.SendAsync(
+                    var attachResult = await devToolsClient.SendAsync(
                         "Target.attachToTarget",
                         new { targetId = target.TargetId, flatten = true },
                         timeout.Token);
@@ -890,7 +909,7 @@ public sealed class SystemBrowserLauncher : IDisposable
                         if (!string.IsNullOrWhiteSpace(sessionId))
                         {
                             targetSessions[target.TargetId] = sessionId!;
-                            await ApplySessionAsync(sessionId!, target.Type, resumeWhenReady: true);
+                            await ApplySessionAsync(sessionId!, target.Type, resumeWhenReady: true, timeout.Token);
                         }
                     }
                 }
@@ -918,17 +937,56 @@ public sealed class SystemBrowserLauncher : IDisposable
                 await applyTask.WaitAsync(timeout.Token);
             }
 
-            await client.SendAsync("Page.navigate", new { url = targetUrl }, timeout.Token, mainSessionId);
+            await devToolsClient.SendAsync("Page.navigate", new { url = targetUrl }, timeout.Token, mainSessionId);
+            _ = ReleaseChromiumDebuggerWaitAsync(devToolsClient, runtimeSession, progress);
             progress?.Invoke($"Chrome timezone applied to page/worker targets: {fingerprint.TimeZone}, {fingerprint.Locale}.");
-            var result = client;
+            var result = new ChromiumDevToolsOverrideSession(devToolsClient, runtimeSession);
             client = null;
+            runtime = null;
             return result;
         }
         catch (Exception ex)
         {
             client?.Dispose();
+            runtime?.Dispose();
             progress?.Invoke($"Chrome override failed: {ex.Message}");
             return null;
+        }
+    }
+
+    private static async Task ResumeChromiumTargetAsync(
+        ChromeDevToolsClient client,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        await TrySendCdpCommandAsync(client, "Runtime.runIfWaitingForDebugger", null, sessionId, null, CancellationToken.None);
+    }
+
+    private static async Task ReleaseChromiumDebuggerWaitAsync(
+        ChromeDevToolsClient client,
+        CancellationTokenSource runtime,
+        Action<string>? progress)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), runtime.Token);
+            await client.SendAsync(
+                "Target.setAutoAttach",
+                new { autoAttach = true, waitForDebuggerOnStart = false, flatten = true },
+                runtime.Token);
+            progress?.Invoke("Chrome DevTools debugger wait released for new tabs.");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            progress?.Invoke($"Chrome debugger wait release skipped: {ex.Message}");
         }
     }
 
@@ -2758,6 +2816,16 @@ emailElement.addEventListener("click", copyEmail);
         IDisposable? DevToolsSession,
         int? DebuggingPort,
         IDisposable? ProfileEmailResource);
+
+    private sealed class ChromiumDevToolsOverrideSession(ChromeDevToolsClient client, CancellationTokenSource runtime) : IDisposable
+    {
+        public void Dispose()
+        {
+            runtime.Cancel();
+            client.Dispose();
+            runtime.Dispose();
+        }
+    }
 
     private sealed record ChromiumTargetInfo(string TargetId, string Type, string Url);
 
