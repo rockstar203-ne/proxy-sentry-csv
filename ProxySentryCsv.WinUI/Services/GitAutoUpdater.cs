@@ -28,6 +28,7 @@ public static class GitAutoUpdater
         ValidateRepositoryPath(repositoryPath);
         log?.Invoke($"Repository: {repositoryPath}");
         log?.Invoke($"Remote URL: {RepositoryUrl}");
+        log?.Invoke($"Git safe.directory: {NormalizeGitSafeDirectory(repositoryPath)}");
 
         var before = (await RunGitAsync(repositoryPath, ["rev-parse", "--verify", "HEAD"], cancellationToken, log)).Trim();
         log?.Invoke($"Current commit: {ShortHead(before)}");
@@ -54,6 +55,7 @@ public static class GitAutoUpdater
     public static async Task<UpdateResult> RollbackAsync(string repositoryPath, string previousHead, Action<string>? log = null, CancellationToken cancellationToken = default)
     {
         ValidateRepositoryPath(repositoryPath);
+        log?.Invoke($"Git safe.directory: {NormalizeGitSafeDirectory(repositoryPath)}");
         if (string.IsNullOrWhiteSpace(previousHead))
         {
             throw new InvalidOperationException("No previous update commit is saved for rollback.");
@@ -102,6 +104,13 @@ public static class GitAutoUpdater
         }
     }
 
+    private static string NormalizeGitSafeDirectory(string repositoryPath)
+    {
+        return Path.GetFullPath(repositoryPath)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .Replace('\\', '/');
+    }
+
     private static async Task<string> RunGitAsync(string repositoryPath, IReadOnlyList<string> arguments, CancellationToken cancellationToken, Action<string>? log)
     {
         log?.Invoke($"git {string.Join(' ', arguments)}");
@@ -115,6 +124,8 @@ public static class GitAutoUpdater
             RedirectStandardError = true
         };
 
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add($"safe.directory={NormalizeGitSafeDirectory(repositoryPath)}");
         startInfo.ArgumentList.Add("-C");
         startInfo.ArgumentList.Add(repositoryPath);
         foreach (var argument in arguments)

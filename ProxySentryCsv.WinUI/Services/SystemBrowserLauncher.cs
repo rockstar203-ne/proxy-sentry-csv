@@ -1,5 +1,4 @@
 ﻿using System.Diagnostics;
-using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Management;
 using System.Net;
@@ -820,256 +819,32 @@ public sealed class SystemBrowserLauncher : IDisposable
         Action<string>? progress)
     {
         ChromeDevToolsClient? client = null;
-        CancellationTokenSource? runtime = null;
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             await LoadChromiumExtensionsAsync(debuggingPort, extensionPaths, progress, timeout.Token);
-            client = await ChromeDevToolsClient.ConnectBrowserAsync(debuggingPort, timeout.Token);
-            var devToolsClient = client;
-            runtime = new CancellationTokenSource();
-            var runtimeSession = runtime;
-            var targetSessions = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var appliedSessions = new ConcurrentDictionary<string, Task>(StringComparer.OrdinalIgnoreCase);
-
-            Task ApplySessionAsync(string sessionId, string targetType, bool resumeWhenReady, CancellationToken cancellationToken)
+            client = await ChromeDevToolsClient.ConnectAsync(debuggingPort, timeout.Token);
+            await client.SendAsync("Page.enable", cancellationToken: timeout.Token);
+            await TrySendCdpCommandAsync(client, "Emulation.setTimezoneOverride", new { timezoneId = fingerprint.TimeZone }, null, timeout.Token);
+            await TrySendCdpCommandAsync(client, "Emulation.setLocaleOverride", new { locale = NormalizePrimaryLocale(fingerprint.Locale) }, null, timeout.Token);
+            if (!string.IsNullOrWhiteSpace(windowLabel))
             {
-                return appliedSessions.GetOrAdd(sessionId, _ => Task.Run(async () =>
-                {
-                    try
-                    {
-                        await ApplyChromiumOverridesToSessionAsync(devToolsClient, sessionId, targetType, fingerprint, windowLabel, cancellationToken);
-                    }
-                    finally
-                    {
-                        if (resumeWhenReady)
-                        {
-                            await TrySendCdpCommandAsync(devToolsClient, "Runtime.runIfWaitingForDebugger", null, sessionId, null, CancellationToken.None);
-                        }
-                    }
-                }, CancellationToken.None));
+                var titleScript = BuildWindowTitleScript(windowLabel);
+                await TrySendCdpCommandAsync(client, "Page.addScriptToEvaluateOnNewDocument", new { source = titleScript }, null, timeout.Token);
+                await TrySendCdpCommandAsync(client, "Runtime.evaluate", new { expression = titleScript, awaitPromise = false }, null, timeout.Token);
             }
-
-            devToolsClient.EventReceived += (method, root) =>
-            {
-                if (!string.Equals(method, "Target.attachedToTarget", StringComparison.Ordinal)
-                    || !root.TryGetProperty("params", out var parameters)
-                    || !parameters.TryGetProperty("sessionId", out var sessionIdElement)
-                    || !parameters.TryGetProperty("targetInfo", out var targetInfo))
-                {
-                    return;
-                }
-
-                var sessionId = sessionIdElement.GetString();
-                var target = ReadChromiumTargetInfo(targetInfo);
-                if (string.IsNullOrWhiteSpace(sessionId))
-                {
-                    return;
-                }
-
-                if (!string.IsNullOrWhiteSpace(target.TargetId))
-                {
-                    targetSessions[target.TargetId] = sessionId!;
-                }
-
-                if (IsChromiumOverrideTarget(target.Type))
-                {
-                    _ = ApplySessionAsync(sessionId!, target.Type, resumeWhenReady: true, runtimeSession.Token);
-                }
-                else
-                {
-                    _ = ResumeChromiumTargetAsync(devToolsClient, sessionId!, runtimeSession.Token);
-                }
-            };
-
-            await devToolsClient.SendAsync("Target.setDiscoverTargets", new { discover = true }, timeout.Token);
-            await devToolsClient.SendAsync(
-                "Target.setAutoAttach",
-                new { autoAttach = true, waitForDebuggerOnStart = true, flatten = true },
-                timeout.Token);
-
-            var targetsResult = await devToolsClient.SendAsync("Target.getTargets", cancellationToken: timeout.Token);
-            var targets = ReadChromiumTargets(targetsResult);
-            foreach (var target in targets.Where(target => IsChromiumOverrideTarget(target.Type)))
-            {
-                if (targetSessions.ContainsKey(target.TargetId))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    var attachResult = await devToolsClient.SendAsync(
-                        "Target.attachToTarget",
-                        new { targetId = target.TargetId, flatten = true },
-                        timeout.Token);
-                    if (attachResult.TryGetProperty("sessionId", out var sessionIdElement))
-                    {
-                        var sessionId = sessionIdElement.GetString();
-                        if (!string.IsNullOrWhiteSpace(sessionId))
-                        {
-                            targetSessions[target.TargetId] = sessionId!;
-                            await ApplySessionAsync(sessionId!, target.Type, resumeWhenReady: true, timeout.Token);
-                        }
-                    }
-                }
-                catch
-                {
-                }
-            }
-
-            var mainTarget = targets.FirstOrDefault(target => IsChromiumPageTarget(target.Type)
-                && string.Equals(target.Url, "about:blank", StringComparison.OrdinalIgnoreCase))
-                ?? targets.FirstOrDefault(target => IsChromiumPageTarget(target.Type));
-            if (mainTarget is null || !targetSessions.TryGetValue(mainTarget.TargetId, out var mainSessionId))
-            {
-                mainSessionId = mainTarget is null
-                    ? null
-                    : await WaitForChromiumTargetSessionAsync(targetSessions, mainTarget.TargetId, timeout.Token);
-                if (string.IsNullOrWhiteSpace(mainSessionId))
-                {
-                    throw new InvalidOperationException("Chrome DevTools page target was not available.");
-                }
-            }
-
-            if (appliedSessions.TryGetValue(mainSessionId, out var applyTask))
-            {
-                await applyTask.WaitAsync(timeout.Token);
-            }
-
-            await devToolsClient.SendAsync("Page.navigate", new { url = targetUrl }, timeout.Token, mainSessionId);
-            _ = ReleaseChromiumDebuggerWaitAsync(devToolsClient, runtimeSession, progress);
-            progress?.Invoke($"Chrome timezone applied to page/worker targets: {fingerprint.TimeZone}, {fingerprint.Locale}.");
-            var result = new ChromiumDevToolsOverrideSession(devToolsClient, runtimeSession);
+            await client.SendAsync("Page.navigate", new { url = targetUrl }, timeout.Token);
+            progress?.Invoke($"Chrome page locale applied: {fingerprint.TimeZone}, {fingerprint.Locale}.");
+            var result = client;
             client = null;
-            runtime = null;
             return result;
         }
         catch (Exception ex)
         {
             client?.Dispose();
-            runtime?.Dispose();
             progress?.Invoke($"Chrome override failed: {ex.Message}");
             return null;
         }
-    }
-
-    private static async Task ResumeChromiumTargetAsync(
-        ChromeDevToolsClient client,
-        string sessionId,
-        CancellationToken cancellationToken)
-    {
-        if (cancellationToken.IsCancellationRequested)
-        {
-            return;
-        }
-
-        await TrySendCdpCommandAsync(client, "Runtime.runIfWaitingForDebugger", null, sessionId, null, CancellationToken.None);
-    }
-
-    private static async Task ReleaseChromiumDebuggerWaitAsync(
-        ChromeDevToolsClient client,
-        CancellationTokenSource runtime,
-        Action<string>? progress)
-    {
-        try
-        {
-            await Task.Delay(TimeSpan.FromSeconds(5), runtime.Token);
-            await client.SendAsync(
-                "Target.setAutoAttach",
-                new { autoAttach = true, waitForDebuggerOnStart = false, flatten = true },
-                runtime.Token);
-            progress?.Invoke("Chrome DevTools debugger wait released for new tabs.");
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception ex)
-        {
-            progress?.Invoke($"Chrome debugger wait release skipped: {ex.Message}");
-        }
-    }
-
-    private static async Task ApplyChromiumOverridesToSessionAsync(
-        ChromeDevToolsClient client,
-        string sessionId,
-        string targetType,
-        BrowserForgeFingerprint fingerprint,
-        string windowLabel,
-        CancellationToken cancellationToken)
-    {
-        await TrySendCdpCommandAsync(client, "Emulation.setTimezoneOverride", new { timezoneId = fingerprint.TimeZone }, sessionId, null, cancellationToken);
-        await TrySendCdpCommandAsync(client, "Emulation.setLocaleOverride", new { locale = NormalizePrimaryLocale(fingerprint.Locale) }, sessionId, null, cancellationToken);
-        await TrySendCdpCommandAsync(client, "Network.setUserAgentOverride", BuildChromiumUserAgentOverride(fingerprint, includeMetadata: true), sessionId, null, cancellationToken);
-
-        if (!IsChromiumPageTarget(targetType) || string.IsNullOrWhiteSpace(windowLabel))
-        {
-            return;
-        }
-
-        var titleScript = BuildWindowTitleScript(windowLabel);
-        await TrySendCdpCommandAsync(client, "Page.enable", null, sessionId, null, cancellationToken);
-        await TrySendCdpCommandAsync(client, "Page.addScriptToEvaluateOnNewDocument", new { source = titleScript }, sessionId, null, cancellationToken);
-        await TrySendCdpCommandAsync(client, "Runtime.evaluate", new { expression = titleScript, awaitPromise = false }, sessionId, null, cancellationToken);
-    }
-
-    private static IReadOnlyList<ChromiumTargetInfo> ReadChromiumTargets(JsonElement result)
-    {
-        if (!result.TryGetProperty("targetInfos", out var targetInfos) || targetInfos.ValueKind != JsonValueKind.Array)
-        {
-            return Array.Empty<ChromiumTargetInfo>();
-        }
-
-        return targetInfos.EnumerateArray()
-            .Select(ReadChromiumTargetInfo)
-            .Where(target => !string.IsNullOrWhiteSpace(target.TargetId))
-            .ToArray();
-    }
-
-    private static ChromiumTargetInfo ReadChromiumTargetInfo(JsonElement targetInfo)
-    {
-        return new ChromiumTargetInfo(
-            GetJsonString(targetInfo, "targetId"),
-            GetJsonString(targetInfo, "type"),
-            GetJsonString(targetInfo, "url"));
-    }
-
-    private static string GetJsonString(JsonElement element, string propertyName)
-    {
-        return element.TryGetProperty(propertyName, out var property) ? property.GetString() ?? "" : "";
-    }
-
-    private static bool IsChromiumPageTarget(string targetType)
-    {
-        return string.Equals(targetType, "page", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(targetType, "iframe", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsChromiumOverrideTarget(string targetType)
-    {
-        return IsChromiumPageTarget(targetType)
-            || string.Equals(targetType, "worker", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(targetType, "shared_worker", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(targetType, "service_worker", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static async Task<string?> WaitForChromiumTargetSessionAsync(
-        ConcurrentDictionary<string, string> targetSessions,
-        string targetId,
-        CancellationToken cancellationToken)
-    {
-        for (var attempt = 0; attempt < 20; attempt++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (targetSessions.TryGetValue(targetId, out var sessionId))
-            {
-                return sessionId;
-            }
-
-            await Task.Delay(100, cancellationToken);
-        }
-
-        return null;
     }
 
     private static async Task LoadChromiumExtensionsAsync(
@@ -1188,73 +963,6 @@ public sealed class SystemBrowserLauncher : IDisposable
             progress?.Invoke($"{method} skipped: {ex.Message}");
             return false;
         }
-    }
-
-    private static object BuildChromiumUserAgentOverride(BrowserForgeFingerprint fingerprint, bool includeMetadata)
-    {
-        var acceptLanguage = ToChromiumAcceptLanguageHeader(fingerprint);
-        if (!includeMetadata)
-        {
-            return new
-            {
-                userAgent = fingerprint.UserAgent,
-                acceptLanguage,
-                platform = "Windows"
-            };
-        }
-
-        var fullVersion = ExtractChromiumFullVersion(fingerprint);
-        var majorVersion = fullVersion.Split('.', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "120";
-        var browserBrand = string.Equals(fingerprint.Browser, "edge", StringComparison.OrdinalIgnoreCase)
-            ? "Microsoft Edge"
-            : "Google Chrome";
-
-        var brands = new[]
-        {
-            new { brand = "Not;A=Brand", version = "99" },
-            new { brand = "Chromium", version = majorVersion },
-            new { brand = browserBrand, version = majorVersion }
-        };
-        var fullVersionList = new[]
-        {
-            new { brand = "Not;A=Brand", version = "99.0.0.0" },
-            new { brand = "Chromium", version = fullVersion },
-            new { brand = browserBrand, version = fullVersion }
-        };
-
-        return new
-        {
-            userAgent = fingerprint.UserAgent,
-            acceptLanguage,
-            platform = "Windows",
-            userAgentMetadata = new
-            {
-                brands,
-                fullVersionList,
-                fullVersion,
-                platform = "Windows",
-                platformVersion = "10.0.0",
-                architecture = "x86",
-                model = "",
-                mobile = false,
-                bitness = "64",
-                wow64 = false
-            }
-        };
-    }
-
-    private static string ExtractChromiumFullVersion(BrowserForgeFingerprint fingerprint)
-    {
-        var userAgent = fingerprint.UserAgent ?? "";
-        var browserMarker = string.Equals(fingerprint.Browser, "edge", StringComparison.OrdinalIgnoreCase) ? "Edg/" : "Chrome/";
-        var match = Regex.Match(userAgent, $"{Regex.Escape(browserMarker)}(?<version>\\d+(?:\\.\\d+)+)", RegexOptions.IgnoreCase);
-        if (match.Success)
-        {
-            return match.Groups["version"].Value;
-        }
-
-        var fallback = Regex.Match(userAgent, "Chrome/(?<version>\\d+(?:\\.\\d+)+)", RegexOptions.IgnoreCase);
-        return fallback.Success ? fallback.Groups["version"].Value : "120.0.0.0";
     }
 
     private static async Task<string> WaitForChromiumPageWebSocketAsync(int debuggingPort, CancellationToken cancellationToken)
@@ -2782,13 +2490,6 @@ emailElement.addEventListener("click", copyEmail);
             : $"{locale},{language},en";
     }
 
-    private static string ToChromiumAcceptLanguageHeader(BrowserForgeFingerprint fingerprint)
-    {
-        return string.IsNullOrWhiteSpace(fingerprint.AcceptLanguage)
-            ? ToChromiumAcceptLanguage(fingerprint)
-            : fingerprint.AcceptLanguage.Trim();
-    }
-
     private void MarkClosed(string stableId)
     {
         TrackedBrowser? tracked = null;
@@ -2816,18 +2517,6 @@ emailElement.addEventListener("click", copyEmail);
         IDisposable? DevToolsSession,
         int? DebuggingPort,
         IDisposable? ProfileEmailResource);
-
-    private sealed class ChromiumDevToolsOverrideSession(ChromeDevToolsClient client, CancellationTokenSource runtime) : IDisposable
-    {
-        public void Dispose()
-        {
-            runtime.Cancel();
-            client.Dispose();
-            runtime.Dispose();
-        }
-    }
-
-    private sealed record ChromiumTargetInfo(string TargetId, string Type, string Url);
 
     private sealed record BrowserVersion(int? Major, string? FullVersion);
 
