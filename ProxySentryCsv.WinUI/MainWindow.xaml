@@ -39,7 +39,9 @@
                     <Button x:Name="ClearUsedButton" Click="ClearUsed_Click" Content="Clear used" />
                     <Button x:Name="CacheButton" Click="Cache_Click" Content="Cache: ..." />
                     <Button x:Name="CloseAllButton" Click="CloseAll_Click" Content="Close All" />
+                    <Button x:Name="ExtensionsButton" Click="Extensions_Click" Content="Extensions" />
                     <Button x:Name="SettingsButton" Click="Settings_Click" Content="Settings" />
+                    <Button x:Name="CheckUpdatesButton" Click="CheckUpdates_Click" Content="Check updates" />
                     <Button x:Name="AboutButton" Click="About_Click" Content="About" />
                     <TextBlock
                         x:Name="SummaryText"

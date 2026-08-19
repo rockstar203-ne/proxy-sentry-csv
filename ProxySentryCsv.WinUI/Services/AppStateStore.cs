@@ -96,6 +96,7 @@ public sealed class AppStateStore
         public bool ShowChromeEmailButton { get; set; }
         public bool ShowEdgeEmailButton { get; set; }
         public bool ShowFirefoxEmailButton { get; set; }
+        public List<BrowserExtensionEntry> GlobalExtensions { get; set; } = [];
     }
 
     public sealed class ProxyPersistedState

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 
 namespace ProxySentryCsv.Services;
 
@@ -21,6 +22,35 @@ public static class GitAutoUpdater
 
         var defaultPath = @"E:\codex\ProxySentryCSV";
         return Directory.Exists(Path.Combine(defaultPath, ".git")) ? defaultPath : "";
+    }
+
+    public static async Task<UpdateCheckResult> CheckAsync(
+        string repositoryPath,
+        Action<string>? log = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateRepositoryPath(repositoryPath);
+        log?.Invoke("Checking for updates.");
+        log?.Invoke($"Git safe.directory: {NormalizeGitSafeDirectory(repositoryPath)}");
+
+        await EnsureOriginAsync(repositoryPath, log, cancellationToken);
+        await RunGitAsync(repositoryPath, ["fetch", "origin", "--prune"], cancellationToken, log);
+
+        var localHead = (await RunGitAsync(repositoryPath, ["rev-parse", "--verify", "HEAD"], cancellationToken, log)).Trim();
+        var remoteHead = (await RunGitAsync(repositoryPath, ["rev-parse", "--verify", "origin/main"], cancellationToken, log)).Trim();
+        var localVersion = await TryReadProjectVersionAsync(repositoryPath, "HEAD", cancellationToken, log);
+        var remoteVersion = await TryReadProjectVersionAsync(repositoryPath, "origin/main", cancellationToken, log);
+
+        log?.Invoke(string.Equals(localHead, remoteHead, StringComparison.OrdinalIgnoreCase)
+            ? "Update check result: already on the latest commit."
+            : $"Update check result: update available {ShortHead(localHead)} -> {ShortHead(remoteHead)}.");
+
+        return new UpdateCheckResult(
+            localHead,
+            remoteHead,
+            localVersion,
+            remoteVersion,
+            !string.Equals(localHead, remoteHead, StringComparison.OrdinalIgnoreCase));
     }
 
     public static async Task<UpdateResult> UpdateAsync(string repositoryPath, Action<string>? log = null, CancellationToken cancellationToken = default)
@@ -88,6 +118,28 @@ public static class GitAutoUpdater
         {
             log?.Invoke($"Updating origin URL from {currentUrl}.");
             await RunGitAsync(repositoryPath, ["remote", "set-url", "origin", RepositoryUrl], cancellationToken, log);
+        }
+    }
+
+    private static async Task<string> TryReadProjectVersionAsync(
+        string repositoryPath,
+        string revision,
+        CancellationToken cancellationToken,
+        Action<string>? log)
+    {
+        try
+        {
+            var projectText = await RunGitAsync(
+                repositoryPath,
+                ["show", $"{revision}:ProxySentryCsv.WinUI/ProxySentryCsv.WinUI.csproj"],
+                cancellationToken,
+                log);
+            var match = Regex.Match(projectText, @"<Version>\s*([^<]+?)\s*</Version>", RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups[1].Value.Trim() : "";
+        }
+        catch
+        {
+            return "";
         }
     }
 
@@ -160,6 +212,13 @@ public static class GitAutoUpdater
             ? ""
             : head.Trim()[..Math.Min(7, head.Trim().Length)];
     }
+
+    public sealed record UpdateCheckResult(
+        string LocalHead,
+        string RemoteHead,
+        string LocalVersion,
+        string RemoteVersion,
+        bool IsUpdateAvailable);
 
     public sealed record UpdateResult(string PreviousHead, string CurrentHead, string Output);
 }

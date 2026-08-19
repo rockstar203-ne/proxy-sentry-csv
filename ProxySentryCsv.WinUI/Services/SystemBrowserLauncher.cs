@@ -24,6 +24,7 @@ public sealed class SystemBrowserLauncher : IDisposable
     private readonly Dictionary<string, TrackedBrowser> _running = new(StringComparer.OrdinalIgnoreCase);
     private readonly ChromeSyncController _chromeSync = new();
     private readonly ProfileEmailLocalServer _profileEmailServer = new();
+    private List<BrowserExtensionEntry> _globalExtensions = [];
     private bool _showChromeEmailButton;
     private bool _showEdgeEmailButton;
     private bool _showFirefoxEmailButton;
@@ -44,6 +45,16 @@ public sealed class SystemBrowserLauncher : IDisposable
         _showChromeEmailButton = chrome;
         _showEdgeEmailButton = edge;
         _showFirefoxEmailButton = firefox;
+    }
+
+    public void SetGlobalExtensions(IEnumerable<BrowserExtensionEntry> extensions)
+    {
+        lock (_gate)
+        {
+            _globalExtensions = extensions
+                .Select(CloneBrowserExtension)
+                .ToList();
+        }
     }
 
     public static bool IsSystemBrowser(string? provider)
@@ -119,6 +130,7 @@ public sealed class SystemBrowserLauncher : IDisposable
                 {
                     progress?.Invoke("CSV email is empty; profile email button skipped.");
                 }
+                chromiumExtensionPaths.AddRange(GetGlobalChromiumExtensionPaths(normalizedProvider, progress));
                 chromiumExtensionPath = string.Join(",", chromiumExtensionPaths);
                 WriteChromiumPreferences(
                     profilePath,
@@ -156,6 +168,7 @@ public sealed class SystemBrowserLauncher : IDisposable
                 {
                     InstallFirefoxProfileEmailExtension(profilePath, extensionProfilePath, progress);
                 }
+                InstallFirefoxGlobalExtensions(profilePath, progress);
                 startInfo.ArgumentList.Add("-no-remote");
                 startInfo.ArgumentList.Add("-profile");
                 startInfo.ArgumentList.Add(profilePath);
@@ -1291,6 +1304,95 @@ public sealed class SystemBrowserLauncher : IDisposable
         var targetPath = Path.Combine(extensionsPath, $"{FirefoxProfileEmailExtensionId}.xpi");
         File.Copy(signedPath, targetPath, overwrite: true);
         progress?.Invoke($"Firefox signed email extension installed: {targetPath}");
+    }
+
+    private void InstallFirefoxGlobalExtensions(string profilePath, Action<string>? progress)
+    {
+        var extensionsPath = Path.Combine(profilePath, "extensions");
+        foreach (var extension in GetGlobalExtensionsSnapshot())
+        {
+            if (!extension.Enabled || !extension.UseFirefox)
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(extension.PackagePath)
+                || !File.Exists(extension.PackagePath)
+                || string.IsNullOrWhiteSpace(extension.FirefoxExtensionId))
+            {
+                progress?.Invoke($"Firefox global extension skipped: {extension.Name}");
+                continue;
+            }
+
+            Directory.CreateDirectory(extensionsPath);
+            var targetPath = Path.Combine(extensionsPath, $"{MakeSafeFirefoxExtensionFileName(extension.FirefoxExtensionId)}.xpi");
+            File.Copy(extension.PackagePath, targetPath, overwrite: true);
+            progress?.Invoke($"Firefox global extension installed: {extension.Name}");
+        }
+    }
+
+    private IReadOnlyList<string> GetGlobalChromiumExtensionPaths(string provider, Action<string>? progress)
+    {
+        var paths = new List<string>();
+        foreach (var extension in GetGlobalExtensionsSnapshot())
+        {
+            if (!extension.Enabled)
+            {
+                continue;
+            }
+
+            var shouldUse = provider == "edge" ? extension.UseEdge : extension.UseChrome;
+            if (!shouldUse)
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(extension.UnpackedPath) || !Directory.Exists(extension.UnpackedPath))
+            {
+                progress?.Invoke($"Chromium global extension skipped: {extension.Name}");
+                continue;
+            }
+
+            paths.Add(extension.UnpackedPath);
+        }
+
+        return paths;
+    }
+
+    private IReadOnlyList<BrowserExtensionEntry> GetGlobalExtensionsSnapshot()
+    {
+        lock (_gate)
+        {
+            return _globalExtensions
+                .Select(CloneBrowserExtension)
+                .ToList();
+        }
+    }
+
+    private static BrowserExtensionEntry CloneBrowserExtension(BrowserExtensionEntry extension)
+    {
+        return new BrowserExtensionEntry
+        {
+            Id = extension.Id,
+            Name = extension.Name,
+            UnpackedPath = extension.UnpackedPath,
+            PackagePath = extension.PackagePath,
+            FirefoxExtensionId = extension.FirefoxExtensionId,
+            SourceKind = extension.SourceKind,
+            Enabled = extension.Enabled,
+            UseChrome = extension.UseChrome,
+            UseEdge = extension.UseEdge,
+            UseFirefox = extension.UseFirefox
+        };
+    }
+
+    private static string MakeSafeFirefoxExtensionFileName(string extensionId)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var chars = extensionId
+            .Select(ch => invalid.Contains(ch) ? '_' : ch)
+            .ToArray();
+        return new string(chars);
     }
 
     private string? FindSignedFirefoxProfileEmailExtensionXpi(string extensionProfilePath)

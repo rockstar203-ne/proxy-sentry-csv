@@ -24,6 +24,7 @@ public sealed partial class MainWindow : Window
     private readonly BrowserForgeFingerprintService _browserForgeFingerprints;
     private readonly ProxyGeoService _proxyGeoService;
     private readonly BrowserCacheService _browserCache;
+    private readonly BrowserExtensionStore _extensionStore;
     private readonly ProxySpeedChecker _proxySpeedChecker = new();
     private AppWindow? _appWindow;
     private ProxyListEntry? _activeList;
@@ -45,6 +46,7 @@ public sealed partial class MainWindow : Window
     public ObservableCollection<ProxyEntry> Proxies { get; } = [];
     public ObservableCollection<ProxyListEntry> ProxyLists { get; } = [];
     public ObservableCollection<SyncMonitorOption> SyncMonitors { get; } = [];
+    public ObservableCollection<BrowserExtensionEntry> GlobalExtensions { get; } = [];
 
     public MainWindow()
     {
@@ -53,6 +55,7 @@ public sealed partial class MainWindow : Window
         _browserForgeFingerprints = new BrowserForgeFingerprintService(_appDataPath);
         _proxyGeoService = new ProxyGeoService(_appDataPath);
         _browserCache = new BrowserCacheService(_appDataPath);
+        _extensionStore = new BrowserExtensionStore(_appDataPath);
         _systemBrowserLauncher = new SystemBrowserLauncher(_appDataPath, _browserForgeFingerprints);
         _jancyLauncher = new JancyLauncher(_appDataPath);
         _systemBrowserLauncher.ProfilesClosed += SystemBrowserLauncher_ProfilesClosed;
@@ -62,7 +65,6 @@ public sealed partial class MainWindow : Window
         RestoreSavedState();
         _suppressStateSave = false;
         Closed += MainWindow_Closed;
-        _ = RunAutoUpdateOnStartupAsync();
         _ = RefreshCacheSizeAsync();
     }
 
@@ -1343,7 +1345,8 @@ Jancy setup:
                 SyncClickDelayMs = _syncClickDelayMs,
                 ShowChromeEmailButton = _showChromeEmailButton,
                 ShowEdgeEmailButton = _showEdgeEmailButton,
-                ShowFirefoxEmailButton = _showFirefoxEmailButton
+                ShowFirefoxEmailButton = _showFirefoxEmailButton,
+                GlobalExtensions = GlobalExtensions.ToList()
             });
     }
 
@@ -1363,6 +1366,12 @@ Jancy setup:
         _showEdgeEmailButton = settings.ShowEdgeEmailButton;
         _showFirefoxEmailButton = settings.ShowFirefoxEmailButton;
         ApplyBrowserEmailButtonSettings();
+        GlobalExtensions.Clear();
+        foreach (var extension in settings.GlobalExtensions)
+        {
+            GlobalExtensions.Add(extension);
+        }
+        ApplyGlobalExtensions();
         _gitRepositoryPath = string.IsNullOrWhiteSpace(settings.GitRepositoryPath)
             ? GitAutoUpdater.DetectRepositoryPath()
             : settings.GitRepositoryPath;
@@ -1902,6 +1911,605 @@ Jancy setup:
             _showFirefoxEmailButton);
     }
 
+    private void ApplyGlobalExtensions()
+    {
+        foreach (var extension in GlobalExtensions)
+        {
+            NormalizeGlobalExtensionTargets(extension);
+        }
+
+        _systemBrowserLauncher.SetGlobalExtensions(GlobalExtensions);
+    }
+
+    private static void NormalizeGlobalExtensionTargets(BrowserExtensionEntry extension)
+    {
+        if (!extension.SupportsChrome)
+        {
+            extension.UseChrome = false;
+        }
+
+        if (!extension.SupportsEdge)
+        {
+            extension.UseEdge = false;
+        }
+
+        if (!extension.SupportsFirefox)
+        {
+            extension.UseFirefox = false;
+        }
+
+        if (!extension.UseChrome && !extension.UseEdge && !extension.UseFirefox)
+        {
+            extension.Enabled = false;
+        }
+    }
+
+    private async void Extensions_Click(object sender, RoutedEventArgs e)
+    {
+        var storeUrlBox = new TextBox
+        {
+            Header = "Install from store URL",
+            PlaceholderText = "Chrome Web Store, Edge Add-ons, or Firefox Add-ons URL",
+            Width = 680
+        };
+        var installStoreButton = new Button { Content = "Install URL" };
+        var addFolderButton = new Button { Content = "Add unpacked folder" };
+        var addPackageButton = new Button { Content = "Add .zip/.xpi" };
+        var statusText = new TextBlock
+        {
+            Text = "Ready",
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.82
+        };
+        var hint = new TextBlock
+        {
+            Text = "Store installs are local to Proxy Sentry CSV. No system browser policies are written, and normal Chrome, Edge, and Firefox profiles are not changed.",
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.82
+        };
+        var sectionsHost = new StackPanel
+        {
+            Spacing = 10
+        };
+
+        void RefreshExtensionSections()
+        {
+            foreach (var extension in GlobalExtensions)
+            {
+                NormalizeGlobalExtensionTargets(extension);
+            }
+
+            sectionsHost.Children.Clear();
+            sectionsHost.Children.Add(BuildBrowserExtensionSection(
+                "Chrome",
+                "Runs only with Chrome windows opened by Proxy Sentry CSV.",
+                extension => extension.SupportsChrome,
+                extension => extension.UseChrome,
+                (extension, enabled) => extension.UseChrome = enabled,
+                RefreshExtensionSections));
+            sectionsHost.Children.Add(BuildBrowserExtensionSection(
+                "Edge",
+                "Runs only with Edge windows opened by Proxy Sentry CSV.",
+                extension => extension.SupportsEdge,
+                extension => extension.UseEdge,
+                (extension, enabled) => extension.UseEdge = enabled,
+                RefreshExtensionSections));
+            sectionsHost.Children.Add(BuildBrowserExtensionSection(
+                "Firefox",
+                "Runs only with Firefox windows opened by Proxy Sentry CSV.",
+                extension => extension.SupportsFirefox,
+                extension => extension.UseFirefox,
+                (extension, enabled) => extension.UseFirefox = enabled,
+                RefreshExtensionSections));
+        }
+
+        installStoreButton.Click += async (_, _) =>
+        {
+            var storeUrl = storeUrlBox.Text.Trim();
+            if (string.IsNullOrWhiteSpace(storeUrl))
+            {
+                ShowMessage("Paste a store extension URL first.", InfoBarSeverity.Warning);
+                return;
+            }
+
+            try
+            {
+                installStoreButton.IsEnabled = false;
+                statusText.Text = "Downloading extension...";
+                var extension = await _extensionStore.ImportFromStoreUrlAsync(storeUrl, line =>
+                {
+                    DispatcherQueue.TryEnqueue(() => statusText.Text = line);
+                });
+                GlobalExtensions.Add(extension);
+                ApplyGlobalExtensions();
+                SaveState();
+                RefreshExtensionSections();
+                storeUrlBox.Text = "";
+                statusText.Text = $"Installed: {extension.Name}";
+                ShowMessage($"Extension installed: {extension.Name}", InfoBarSeverity.Success);
+            }
+            catch (Exception ex)
+            {
+                statusText.Text = ex.Message;
+                ShowMessage(ex.Message, InfoBarSeverity.Error);
+            }
+            finally
+            {
+                installStoreButton.IsEnabled = true;
+            }
+        };
+
+        addFolderButton.Click += async (_, _) =>
+        {
+            var path = await PickExtensionFolderAsync();
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            try
+            {
+                var extension = _extensionStore.Import(path);
+                GlobalExtensions.Add(extension);
+                ApplyGlobalExtensions();
+                SaveState();
+                RefreshExtensionSections();
+                ShowMessage($"Extension added: {extension.Name}", InfoBarSeverity.Success);
+            }
+            catch (Exception ex)
+            {
+                ShowMessage(ex.Message, InfoBarSeverity.Error);
+            }
+        };
+
+        addPackageButton.Click += async (_, _) =>
+        {
+            var path = await PickExtensionPackageAsync();
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            try
+            {
+                var extension = _extensionStore.Import(path);
+                GlobalExtensions.Add(extension);
+                ApplyGlobalExtensions();
+                SaveState();
+                RefreshExtensionSections();
+                ShowMessage($"Extension added: {extension.Name}", InfoBarSeverity.Success);
+            }
+            catch (Exception ex)
+            {
+                ShowMessage(ex.Message, InfoBarSeverity.Error);
+            }
+        };
+
+        var buttonPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8
+        };
+        buttonPanel.Children.Add(installStoreButton);
+        buttonPanel.Children.Add(addFolderButton);
+        buttonPanel.Children.Add(addPackageButton);
+
+        var panel = new StackPanel
+        {
+            Spacing = 10,
+            Width = 680
+        };
+        panel.Children.Add(hint);
+        panel.Children.Add(storeUrlBox);
+        panel.Children.Add(buttonPanel);
+        panel.Children.Add(statusText);
+        RefreshExtensionSections();
+        panel.Children.Add(sectionsHost);
+
+        var scrollViewer = new ScrollViewer
+        {
+            Content = panel,
+            Width = 720,
+            MaxHeight = 560,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        };
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Root.XamlRoot,
+            Title = "Global browser extensions",
+            Content = scrollViewer,
+            CloseButtonText = "Close"
+        };
+
+        await dialog.ShowAsync();
+        ApplyGlobalExtensions();
+        SaveState();
+    }
+
+    private FrameworkElement BuildBrowserExtensionSection(
+        string browserName,
+        string description,
+        Func<BrowserExtensionEntry, bool> canUse,
+        Func<BrowserExtensionEntry, bool> isSelected,
+        Action<BrowserExtensionEntry, bool> setSelected,
+        Action refreshSections)
+    {
+        var section = new StackPanel
+        {
+            Spacing = 8
+        };
+        section.Children.Add(new TextBlock
+        {
+            Text = browserName,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            FontSize = 16
+        });
+        section.Children.Add(new TextBlock
+        {
+            Text = description,
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.72
+        });
+
+        var entries = GlobalExtensions
+            .Where(canUse)
+            .OrderByDescending(isSelected)
+            .ThenBy(extension => extension.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (entries.Count == 0)
+        {
+            section.Children.Add(new TextBlock
+            {
+                Text = $"No {browserName} extensions installed.",
+                Opacity = 0.72
+            });
+            return CreateExtensionSectionBorder(section);
+        }
+
+        foreach (var extension in entries)
+        {
+            section.Children.Add(BuildBrowserExtensionRow(browserName, extension, canUse, isSelected, setSelected, refreshSections));
+        }
+
+        return CreateExtensionSectionBorder(section);
+    }
+
+    private FrameworkElement BuildBrowserExtensionRow(
+        string browserName,
+        BrowserExtensionEntry extension,
+        Func<BrowserExtensionEntry, bool> canUse,
+        Func<BrowserExtensionEntry, bool> isSelected,
+        Action<BrowserExtensionEntry, bool> setSelected,
+        Action refreshSections)
+    {
+        var row = new StackPanel
+        {
+            Spacing = 6,
+            Padding = new Thickness(8, 6, 8, 6)
+        };
+
+        var runBox = new CheckBox
+        {
+            Content = $"Run with {browserName}",
+            IsChecked = isSelected(extension),
+            IsEnabled = canUse(extension),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        runBox.Checked += (_, _) =>
+        {
+            extension.Enabled = true;
+            setSelected(extension, true);
+            ApplyGlobalExtensions();
+            SaveState();
+        };
+        runBox.Unchecked += (_, _) =>
+        {
+            setSelected(extension, false);
+            if (!extension.UseChrome && !extension.UseEdge && !extension.UseFirefox)
+            {
+                extension.Enabled = false;
+            }
+
+            ApplyGlobalExtensions();
+            SaveState();
+        };
+
+        var details = new StackPanel
+        {
+            Spacing = 2,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        details.Children.Add(new TextBlock
+        {
+            Text = extension.Name,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        });
+        details.Children.Add(new TextBlock
+        {
+            Text = $"{extension.SourceKind} | {extension.SupportText}",
+            FontSize = 12,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Opacity = 0.72
+        });
+
+        var removeButton = new Button
+        {
+            Content = "Remove",
+            MinWidth = 86,
+            HorizontalAlignment = HorizontalAlignment.Left
+        };
+        removeButton.Click += (_, _) =>
+        {
+            try
+            {
+                _extensionStore.Remove(extension);
+                GlobalExtensions.Remove(extension);
+                ApplyGlobalExtensions();
+                SaveState();
+                refreshSections();
+                ShowMessage($"Extension removed: {extension.Name}", InfoBarSeverity.Success);
+            }
+            catch (Exception ex)
+            {
+                ShowMessage(ex.Message, InfoBarSeverity.Error);
+            }
+        };
+
+        var actions = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10
+        };
+        actions.Children.Add(runBox);
+        actions.Children.Add(removeButton);
+
+        row.Children.Add(details);
+        row.Children.Add(actions);
+        return row;
+    }
+
+    private static Border CreateExtensionSectionBorder(UIElement content)
+    {
+        return new Border
+        {
+            Child = content,
+            Padding = new Thickness(10),
+            BorderThickness = new Thickness(1),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(96, 128, 128, 128)),
+            CornerRadius = new CornerRadius(6)
+        };
+    }
+
+    private async Task<string?> PickExtensionFolderAsync()
+    {
+        var picker = new FolderPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add("*");
+        var folder = await picker.PickSingleFolderAsync();
+        return folder?.Path;
+    }
+
+    private async Task<string?> PickExtensionPackageAsync()
+    {
+        var picker = new FileOpenPicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add(".zip");
+        picker.FileTypeFilter.Add(".crx");
+        picker.FileTypeFilter.Add(".xpi");
+        var file = await picker.PickSingleFileAsync();
+        return file?.Path;
+    }
+
+    private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
+    {
+        GitAutoUpdater.UpdateCheckResult? lastCheck = null;
+        var busy = false;
+        var currentVersionText = new TextBlock
+        {
+            Text = $"Current version: {GetCurrentAppVersion()}",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+        };
+        var availableVersionText = new TextBlock
+        {
+            Text = "Latest version: not checked yet",
+            Opacity = 0.82
+        };
+        var statusText = new TextBlock
+        {
+            Text = "Checking for updates...",
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = 15
+        };
+        var progressRing = new ProgressRing
+        {
+            Width = 28,
+            Height = 28,
+            IsActive = true,
+            Visibility = Visibility.Visible
+        };
+        var detailsText = new TextBlock
+        {
+            Text = "Proxy Sentry CSV will check the configured Git repository and compare your version with the latest available version.",
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.72
+        };
+        var checkButton = new Button { Content = "Check again" };
+        var updateButton = new Button { Content = "Install update", IsEnabled = false };
+        var rollbackButton = new Button
+        {
+            Content = "Rollback previous version",
+            IsEnabled = !string.IsNullOrWhiteSpace(_lastUpdatePreviousHead)
+        };
+
+        void SetBusy(bool value, string status)
+        {
+            busy = value;
+            statusText.Text = status;
+            progressRing.IsActive = value;
+            progressRing.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+            checkButton.IsEnabled = !value;
+            updateButton.IsEnabled = !value && lastCheck?.IsUpdateAvailable == true;
+            rollbackButton.IsEnabled = !value && !string.IsNullOrWhiteSpace(_lastUpdatePreviousHead);
+        }
+
+        void SetFinished(string status, InfoBarSeverity severity = InfoBarSeverity.Informational)
+        {
+            SetBusy(false, status);
+            ShowMessage(status, severity);
+        }
+
+        async Task RunCheckAsync()
+        {
+            try
+            {
+                lastCheck = null;
+                availableVersionText.Text = "Latest version: checking...";
+                updateButton.IsEnabled = false;
+                SetBusy(true, "Checking for updates...");
+                var check = await GitAutoUpdater.CheckAsync(GetConfiguredRepositoryPath());
+                lastCheck = check;
+                var remoteVersion = string.IsNullOrWhiteSpace(check.RemoteVersion)
+                    ? "latest commit"
+                    : check.RemoteVersion;
+                availableVersionText.Text = $"Latest version: {remoteVersion}";
+
+                if (check.IsUpdateAvailable)
+                {
+                    SetFinished($"Update available: version {remoteVersion}.", InfoBarSeverity.Success);
+                    updateButton.IsEnabled = true;
+                    return;
+                }
+
+                SetFinished("Your version is up to date.", InfoBarSeverity.Success);
+            }
+            catch (Exception ex)
+            {
+                lastCheck = null;
+                availableVersionText.Text = "Latest version: check failed";
+                detailsText.Text = ex.Message;
+                SetFinished($"Update check failed: {ex.Message}", InfoBarSeverity.Error);
+            }
+        }
+
+        async Task RunUpdateAsync()
+        {
+            try
+            {
+                SaveState();
+                SetBusy(true, "Installing update...");
+                detailsText.Text = "Downloading and applying the latest version. Keep Proxy Sentry CSV open until this finishes.";
+                var result = await GitAutoUpdater.UpdateAsync(GetConfiguredRepositoryPath());
+                if (!string.Equals(result.PreviousHead, result.CurrentHead, StringComparison.OrdinalIgnoreCase))
+                {
+                    _lastUpdatePreviousHead = result.PreviousHead;
+                    SaveState();
+                    lastCheck = lastCheck is null
+                        ? null
+                        : lastCheck with { IsUpdateAvailable = false, LocalHead = result.CurrentHead };
+                    SetFinished("Update installed. Restart Proxy Sentry CSV to use the updated version.", InfoBarSeverity.Success);
+                    detailsText.Text = "Update completed. Your app state and Data folder were not reset.";
+                    return;
+                }
+
+                lastCheck = lastCheck is null
+                    ? null
+                    : lastCheck with { IsUpdateAvailable = false };
+                SetFinished("Your version is up to date.", InfoBarSeverity.Success);
+                detailsText.Text = "No update was applied because the app is already on the latest version.";
+            }
+            catch (Exception ex)
+            {
+                detailsText.Text = ex.Message;
+                SetFinished($"Update failed: {ex.Message}", InfoBarSeverity.Error);
+            }
+        }
+
+        async Task RunRollbackAsync()
+        {
+            try
+            {
+                SaveState();
+                SetBusy(true, "Rolling back to the previous version...");
+                detailsText.Text = "Restoring the previous Git version. Your app state and Data folder are kept.";
+                var result = await GitAutoUpdater.RollbackAsync(GetConfiguredRepositoryPath(), _lastUpdatePreviousHead);
+                _lastUpdatePreviousHead = result.PreviousHead;
+                SaveState();
+                lastCheck = null;
+                SetFinished("Rollback completed. Restart Proxy Sentry CSV to use the restored version.", InfoBarSeverity.Success);
+                detailsText.Text = "Rollback completed. You can use Check again after restart to verify the version.";
+            }
+            catch (Exception ex)
+            {
+                detailsText.Text = ex.Message;
+                SetFinished($"Rollback failed: {ex.Message}", InfoBarSeverity.Error);
+            }
+        }
+
+        checkButton.Click += async (_, _) =>
+        {
+            if (!busy)
+            {
+                await RunCheckAsync();
+            }
+        };
+        updateButton.Click += async (_, _) =>
+        {
+            if (!busy)
+            {
+                await RunUpdateAsync();
+            }
+        };
+        rollbackButton.Click += async (_, _) =>
+        {
+            if (!busy)
+            {
+                await RunRollbackAsync();
+            }
+        };
+
+        var statusRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10
+        };
+        statusRow.Children.Add(progressRing);
+        statusRow.Children.Add(statusText);
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8
+        };
+        buttons.Children.Add(checkButton);
+        buttons.Children.Add(updateButton);
+        buttons.Children.Add(rollbackButton);
+
+        var panel = new StackPanel
+        {
+            Width = 520,
+            Spacing = 12
+        };
+        panel.Children.Add(currentVersionText);
+        panel.Children.Add(availableVersionText);
+        panel.Children.Add(statusRow);
+        panel.Children.Add(detailsText);
+        panel.Children.Add(buttons);
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Root.XamlRoot,
+            Title = "Updates",
+            Content = panel,
+            CloseButtonText = "Close"
+        };
+        dialog.Opened += (_, _) => _ = RunCheckAsync();
+        await dialog.ShowAsync();
+        SaveState();
+    }
+
     private async void Settings_Click(object sender, RoutedEventArgs e)
     {
         var endpointBox = new TextBox
@@ -1912,12 +2520,6 @@ Jancy setup:
             Width = 430
         };
         var installBridgeButton = new Button { Content = "Install Jancy bridge" };
-        var autoUpdateBox = new CheckBox
-        {
-            Content = "Auto-update on startup through git pull --ff-only",
-            IsChecked = _autoUpdateEnabled,
-            Width = 430
-        };
         var defaultBrowserBox = new ComboBox
         {
             Header = "Default browser for new proxies",
@@ -1965,98 +2567,19 @@ Jancy setup:
         emailButtonPanel.Children.Add(edgeEmailButtonBox);
         emailButtonPanel.Children.Add(firefoxEmailButtonBox);
         emailButtonPanel.Children.Add(emailButtonHint);
-        var runUpdateButton = new Button { Content = "Run git update" };
-        var rollbackButton = new Button { Content = "Rollback previous update" };
-        var statusText = new TextBox
-        {
-            Header = "Update log",
-            IsReadOnly = true,
-            AcceptsReturn = true,
-            Width = 430,
-            Height = 110,
-            TextWrapping = TextWrapping.Wrap,
-            Text = string.IsNullOrWhiteSpace(_lastUpdatePreviousHead)
-                ? "Ready"
-                : $"Ready. Rollback target: {_lastUpdatePreviousHead[..Math.Min(7, _lastUpdatePreviousHead.Length)]}"
-        };
-
         installBridgeButton.Click += (_, _) =>
         {
             try
             {
                 var bridgePath = _jancyLauncher.InstallBridge();
                 var profilePath = _jancyLauncher.ExportProfiles(GetAllLoadedProxies(), TargetUrlBox.Text.Trim());
-                AppendUpdateLog(statusText, $"Installed Jancy bridge: {bridgePath}");
-                AppendUpdateLog(statusText, $"Exported Jancy profiles: {profilePath}");
+                ShowMessage($"Installed Jancy bridge. Exported profiles: {profilePath}", InfoBarSeverity.Success);
             }
             catch (Exception ex)
             {
-                AppendUpdateLog(statusText, ex.Message);
+                ShowMessage(ex.Message, InfoBarSeverity.Error);
             }
         };
-
-        runUpdateButton.Click += async (_, _) =>
-        {
-            try
-            {
-                runUpdateButton.IsEnabled = false;
-                SaveState();
-                statusText.Text = "";
-                AppendUpdateLog(statusText, "Starting git update.");
-                var result = await GitAutoUpdater.UpdateAsync(GetConfiguredRepositoryPath(), line =>
-                {
-                    DispatcherQueue.TryEnqueue(() => AppendUpdateLog(statusText, line));
-                });
-                if (!string.Equals(result.PreviousHead, result.CurrentHead, StringComparison.OrdinalIgnoreCase))
-                {
-                    _lastUpdatePreviousHead = result.PreviousHead;
-                    SaveState();
-                    AppendUpdateLog(statusText, $"Rollback saved: {_lastUpdatePreviousHead[..Math.Min(7, _lastUpdatePreviousHead.Length)]}");
-                }
-                AppendUpdateLog(statusText, "Git update completed. Restart Proxy Sentry CSV to run updated binaries.");
-            }
-            catch (Exception ex)
-            {
-                AppendUpdateLog(statusText, ex.Message);
-            }
-            finally
-            {
-                runUpdateButton.IsEnabled = true;
-            }
-        };
-
-        rollbackButton.Click += async (_, _) =>
-        {
-            try
-            {
-                rollbackButton.IsEnabled = false;
-                SaveState();
-                AppendUpdateLog(statusText, "Starting rollback.");
-                var result = await GitAutoUpdater.RollbackAsync(GetConfiguredRepositoryPath(), _lastUpdatePreviousHead, line =>
-                {
-                    DispatcherQueue.TryEnqueue(() => AppendUpdateLog(statusText, line));
-                });
-                _lastUpdatePreviousHead = result.PreviousHead;
-                SaveState();
-                AppendUpdateLog(statusText, "Rollback completed. Restart Proxy Sentry CSV to run restored binaries.");
-            }
-            catch (Exception ex)
-            {
-                AppendUpdateLog(statusText, ex.Message);
-            }
-            finally
-            {
-                rollbackButton.IsEnabled = true;
-            }
-        };
-
-        var updateButtons = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8
-        };
-        updateButtons.Children.Add(runUpdateButton);
-        updateButtons.Children.Add(rollbackButton);
 
         var panel = new StackPanel
         {
@@ -2067,9 +2590,6 @@ Jancy setup:
         panel.Children.Add(installBridgeButton);
         panel.Children.Add(defaultBrowserBox);
         panel.Children.Add(emailButtonPanel);
-        panel.Children.Add(autoUpdateBox);
-        panel.Children.Add(updateButtons);
-        panel.Children.Add(statusText);
 
         var scrollViewer = new ScrollViewer
         {
@@ -2100,7 +2620,7 @@ Jancy setup:
         _jancyEndpointUrl = string.IsNullOrWhiteSpace(endpointBox.Text)
             ? "http://127.0.0.1:43033"
             : endpointBox.Text.Trim();
-        _autoUpdateEnabled = autoUpdateBox.IsChecked == true;
+        _autoUpdateEnabled = false;
         _defaultBrowserProvider = NormalizeBrowserProvider((defaultBrowserBox.SelectedItem as ComboBoxItem)?.Tag?.ToString());
         _showChromeEmailButton = chromeEmailButtonBox.IsChecked == true;
         _showEdgeEmailButton = edgeEmailButtonBox.IsChecked == true;
@@ -2152,6 +2672,20 @@ Jancy setup:
         }
 
         return _gitRepositoryPath;
+    }
+
+    private static string GetCurrentAppVersion()
+    {
+        var version = typeof(MainWindow).Assembly.GetName().Version;
+        if (version is null)
+        {
+            return "unknown";
+        }
+
+        var parts = new[] { version.Major, version.Minor, version.Build }
+            .Where(part => part >= 0)
+            .ToArray();
+        return parts.Length == 0 ? "unknown" : string.Join('.', parts);
     }
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
