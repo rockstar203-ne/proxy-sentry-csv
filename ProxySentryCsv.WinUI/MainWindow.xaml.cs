@@ -1372,9 +1372,7 @@ Jancy setup:
             GlobalExtensions.Add(extension);
         }
         ApplyGlobalExtensions();
-        _gitRepositoryPath = string.IsNullOrWhiteSpace(settings.GitRepositoryPath)
-            ? GitAutoUpdater.DetectRepositoryPath()
-            : settings.GitRepositoryPath;
+        _gitRepositoryPath = GitAutoUpdater.DetectRepositoryPath();
         _lastUpdatePreviousHead = settings.LastUpdatePreviousHead;
         SearchBox.Text = settings.SearchText;
 
@@ -2307,6 +2305,7 @@ Jancy setup:
     {
         GitAutoUpdater.UpdateCheckResult? lastCheck = null;
         var busy = false;
+        _lastUpdatePreviousHead = GitAutoUpdater.GetLatestBackupPath(GetConfiguredRepositoryPath()) ?? _lastUpdatePreviousHead;
         var currentVersionText = new TextBlock
         {
             Text = $"Current version: {GetCurrentAppVersion()}",
@@ -2332,7 +2331,7 @@ Jancy setup:
         };
         var detailsText = new TextBlock
         {
-            Text = "Proxy Sentry CSV will check the configured Git repository and compare your version with the latest available version.",
+            Text = "Proxy Sentry CSV will check the GitHub release channel and compare your version with the latest available version.",
             TextWrapping = TextWrapping.Wrap,
             Opacity = 0.72
         };
@@ -2341,7 +2340,7 @@ Jancy setup:
         var rollbackButton = new Button
         {
             Content = "Rollback previous version",
-            IsEnabled = !string.IsNullOrWhiteSpace(_lastUpdatePreviousHead)
+            IsEnabled = GitAutoUpdater.CanRollback(GetConfiguredRepositoryPath(), _lastUpdatePreviousHead)
         };
 
         void SetBusy(bool value, string status)
@@ -2352,7 +2351,7 @@ Jancy setup:
             progressRing.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
             checkButton.IsEnabled = !value;
             updateButton.IsEnabled = !value && lastCheck?.IsUpdateAvailable == true;
-            rollbackButton.IsEnabled = !value && !string.IsNullOrWhiteSpace(_lastUpdatePreviousHead);
+            rollbackButton.IsEnabled = !value && GitAutoUpdater.CanRollback(GetConfiguredRepositoryPath(), _lastUpdatePreviousHead);
         }
 
         void SetFinished(string status, InfoBarSeverity severity = InfoBarSeverity.Informational)
@@ -2400,17 +2399,18 @@ Jancy setup:
             {
                 SaveState();
                 SetBusy(true, "Installing update...");
-                detailsText.Text = "Downloading and applying the latest version. Keep Proxy Sentry CSV open until this finishes.";
+                detailsText.Text = "Downloading the latest portable package. Proxy Sentry CSV will restart when the updater starts.";
                 var result = await GitAutoUpdater.UpdateAsync(GetConfiguredRepositoryPath());
                 if (!string.Equals(result.PreviousHead, result.CurrentHead, StringComparison.OrdinalIgnoreCase))
                 {
-                    _lastUpdatePreviousHead = result.PreviousHead;
                     SaveState();
                     lastCheck = lastCheck is null
                         ? null
                         : lastCheck with { IsUpdateAvailable = false, LocalHead = result.CurrentHead };
-                    SetFinished("Update installed. Restart Proxy Sentry CSV to use the updated version.", InfoBarSeverity.Success);
-                    detailsText.Text = "Update completed. Your app state and Data folder were not reset.";
+                    SetFinished("Update downloaded. Proxy Sentry CSV will close and restart to apply it.", InfoBarSeverity.Success);
+                    detailsText.Text = "The updater is applying the release package. Your Data folder and app state are kept.";
+                    await Task.Delay(800);
+                    Application.Current.Exit();
                     return;
                 }
 
@@ -2433,13 +2433,14 @@ Jancy setup:
             {
                 SaveState();
                 SetBusy(true, "Rolling back to the previous version...");
-                detailsText.Text = "Restoring the previous Git version. Your app state and Data folder are kept.";
+                detailsText.Text = "Restoring the previous portable backup. Your app state and Data folder are kept.";
                 var result = await GitAutoUpdater.RollbackAsync(GetConfiguredRepositoryPath(), _lastUpdatePreviousHead);
-                _lastUpdatePreviousHead = result.PreviousHead;
                 SaveState();
                 lastCheck = null;
-                SetFinished("Rollback completed. Restart Proxy Sentry CSV to use the restored version.", InfoBarSeverity.Success);
-                detailsText.Text = "Rollback completed. You can use Check again after restart to verify the version.";
+                SetFinished("Rollback started. Proxy Sentry CSV will close and restart.", InfoBarSeverity.Success);
+                detailsText.Text = "The updater is restoring the previous backup.";
+                await Task.Delay(800);
+                Application.Current.Exit();
             }
             catch (Exception ex)
             {
@@ -2632,45 +2633,12 @@ Jancy setup:
 
     private async Task RunAutoUpdateOnStartupAsync()
     {
-        if (!_autoUpdateEnabled)
-        {
-            return;
-        }
-
-        try
-        {
-            var result = await GitAutoUpdater.UpdateAsync(GetConfiguredRepositoryPath(), line =>
-            {
-                DispatcherQueue.TryEnqueue(() =>
-                {
-                    LogTitleText.Text = "Update";
-                    LogText.Text = $"[{DateTime.Now:HH:mm:ss}] {line}";
-                });
-            });
-
-            if (!string.Equals(result.PreviousHead, result.CurrentHead, StringComparison.OrdinalIgnoreCase))
-            {
-                _lastUpdatePreviousHead = result.PreviousHead;
-                DispatcherQueue.TryEnqueue(() =>
-                {
-                    SaveState();
-                    ShowMessage($"Git auto-update completed: {result.PreviousHead[..7]} -> {result.CurrentHead[..7]}. Restart to run updated binaries.", InfoBarSeverity.Success);
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            DispatcherQueue.TryEnqueue(() => ShowMessage($"Git auto-update failed: {ex.Message}", InfoBarSeverity.Warning));
-        }
+        await Task.CompletedTask;
     }
 
     private string GetConfiguredRepositoryPath()
     {
-        if (string.IsNullOrWhiteSpace(_gitRepositoryPath))
-        {
-            _gitRepositoryPath = GitAutoUpdater.DetectRepositoryPath();
-        }
-
+        _gitRepositoryPath = GitAutoUpdater.DetectRepositoryPath();
         return _gitRepositoryPath;
     }
 

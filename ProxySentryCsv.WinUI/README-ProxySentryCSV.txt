@@ -41,8 +41,12 @@ Selection and sync:
   Sync includes navigation, mouse movement, clicks, wheel, scroll, text input, and keyboard input.
 
 Updates:
-  Settings uses the built-in repository URL:
-    https://github.com/rockstar203-ne/proxy-sentry-csv.git
-  Run git update writes a step-by-step log and saves the previous commit for rollback.
-  Rollback previous update resets the git repository to that saved commit.
+  Check updates uses the built-in GitHub Releases channel:
+    https://api.github.com/repos/rockstar203-ne/proxy-sentry-csv/releases/latest
+  No Git credential or browser authorization prompt is shown by the app.
+  For a private release channel, put a GitHub token with release read access into
+  update.key next to Proxy Sentry CSV.exe or into Data\update.key.
+  Install update downloads the portable ZIP, starts ProxySentryCsv.Updater.exe,
+  backs up the current program files, replaces only the app files, and restarts.
+  Rollback previous version restores the latest local backup.
   Data\ keeps app state and is not reset by update or rollback.

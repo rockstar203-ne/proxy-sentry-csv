@@ -9,3 +9,4 @@ release-next/
 *.userosscache
 *.sln.docstates
 *Backup authentication codes*.txt
+update.key

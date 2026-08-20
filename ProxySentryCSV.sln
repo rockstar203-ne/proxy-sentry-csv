@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProxySentryCsv.WinUI", "Pro
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProxySentryCsv.Launcher", "ProxySentryCsv.Launcher\ProxySentryCsv.Launcher.csproj", "{210B3B19-4085-49BF-AB7F-15AB983A0F76}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProxySentryCsv.Updater", "ProxySentryCsv.Updater\ProxySentryCsv.Updater.csproj", "{EA31A843-9582-4E34-9835-F516CAA118FF}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -24,5 +26,9 @@ Global
 		{210B3B19-4085-49BF-AB7F-15AB983A0F76}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{210B3B19-4085-49BF-AB7F-15AB983A0F76}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{210B3B19-4085-49BF-AB7F-15AB983A0F76}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EA31A843-9582-4E34-9835-F516CAA118FF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EA31A843-9582-4E34-9835-F516CAA118FF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EA31A843-9582-4E34-9835-F516CAA118FF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EA31A843-9582-4E34-9835-F516CAA118FF}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
