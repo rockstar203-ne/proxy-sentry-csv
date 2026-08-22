@@ -28,6 +28,7 @@ jobs:
         run: |
           dotnet restore ProxySentryCsv.WinUI/ProxySentryCsv.WinUI.csproj -r win-x64
           dotnet restore ProxySentryCsv.Launcher/ProxySentryCsv.Launcher.csproj -r win-x64
+          dotnet restore ProxySentryCsv.Updater/ProxySentryCsv.Updater.csproj -r win-x64
 
       - name: Build
         run: dotnet build ProxySentryCSV.sln -c Release --no-restore
@@ -36,6 +37,7 @@ jobs:
         run: |
           dotnet publish ProxySentryCsv.WinUI/ProxySentryCsv.WinUI.csproj -c Release -p:Platform=x64 -r win-x64 --self-contained true -o release/components
           dotnet publish ProxySentryCsv.Launcher/ProxySentryCsv.Launcher.csproj -c Release -r win-x64 --self-contained true -o release/launcher
+          dotnet publish ProxySentryCsv.Updater/ProxySentryCsv.Updater.csproj -c Release -r win-x64 --self-contained true -o release/updater
 
       - name: Pack portable folder
         shell: pwsh
@@ -46,6 +48,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $root "Data") | Out-Null
 
           Copy-Item -Recurse -Force "release/components/*" $components
+          Copy-Item -Force "release/updater/ProxySentryCsv.Updater.exe" (Join-Path $components "ProxySentryCsv.Updater.exe")
           Copy-Item -Force "release/launcher/Proxy Sentry CSV.exe" (Join-Path $root "Proxy Sentry CSV.exe")
           Copy-Item -Force "ProxySentryCsv.WinUI/README-ProxySentryCSV.txt" (Join-Path $root "README-ProxySentryCSV.txt")
 
@@ -54,6 +57,9 @@ jobs:
           }
           if (-not (Test-Path (Join-Path $components "Proxy Sentry CSV.exe"))) {
             throw "Proxy Sentry CSV component executable is missing from portable package."
+          }
+          if (-not (Test-Path (Join-Path $components "ProxySentryCsv.Updater.exe"))) {
+            throw "Proxy Sentry CSV updater executable is missing from portable package."
           }
 
           Compress-Archive -Path $root -DestinationPath "release/ProxySentryCSV-portable-win10-win11.zip" -CompressionLevel Optimal -Force
@@ -89,4 +95,3 @@ jobs:
               gh release create $tag $zip --title $title --notes "Portable Windows 10/11 build."
             }
           }
-

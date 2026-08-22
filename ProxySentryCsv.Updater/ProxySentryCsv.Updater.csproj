@@ -7,9 +7,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>ProxySentryCsv.Updater</AssemblyName>
-    <Version>1.8.14</Version>
-    <AssemblyVersion>1.8.14.0</AssemblyVersion>
-    <FileVersion>1.8.14.0</FileVersion>
+    <Version>1.8.15</Version>
+    <AssemblyVersion>1.8.15.0</AssemblyVersion>
+    <FileVersion>1.8.15.0</FileVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishTrimmed>false</PublishTrimmed>

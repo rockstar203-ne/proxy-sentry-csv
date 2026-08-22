@@ -43,9 +43,7 @@ Selection and sync:
 Updates:
   Check updates uses the built-in GitHub Releases channel:
     https://api.github.com/repos/rockstar203-ne/proxy-sentry-csv/releases/latest
-  No Git credential or browser authorization prompt is shown by the app.
-  For a private release channel, put a GitHub token with release read access into
-  update.key next to Proxy Sentry CSV.exe or into Data\update.key.
+  No Git credential, token file, or browser authorization prompt is required.
   Install update downloads the portable ZIP, starts ProxySentryCsv.Updater.exe,
   backs up the current program files, replaces only the app files, and restarts.
   Rollback previous version restores the latest local backup.

@@ -15,7 +15,6 @@ public static class GitAutoUpdater
     private const string RootLauncherName = "Proxy Sentry CSV.exe";
     private const string WinUiExeName = "Proxy Sentry CSV.exe";
     private const string UpdaterExeName = "ProxySentryCsv.Updater.exe";
-    private const string UpdateKeyFileName = "update.key";
 
     public static string DetectRepositoryPath() => ResolvePortableRoot("");
 
@@ -313,47 +312,7 @@ public static class GitAutoUpdater
         client.DefaultRequestHeaders.UserAgent.ParseAdd("ProxySentryCSV-Updater/1.0");
         client.DefaultRequestHeaders.Accept.ParseAdd("application/json, application/octet-stream;q=0.9, */*;q=0.8");
 
-        var token = ResolveUpdateToken(updateRoot);
-        if (!string.IsNullOrWhiteSpace(token))
-        {
-            client.DefaultRequestHeaders.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token.Trim());
-        }
-
         return client;
-    }
-
-    private static string ResolveUpdateToken(string updateRoot)
-    {
-        var env = Environment.GetEnvironmentVariable("PROXY_SENTRY_UPDATE_TOKEN");
-        if (!string.IsNullOrWhiteSpace(env))
-        {
-            return env.Trim();
-        }
-
-        var candidates = new[]
-        {
-            Path.Combine(updateRoot, "Data", UpdateKeyFileName),
-            Path.Combine(updateRoot, UpdateKeyFileName),
-            Path.Combine(AppContext.BaseDirectory, UpdateKeyFileName)
-        };
-
-        foreach (var candidate in candidates)
-        {
-            try
-            {
-                if (File.Exists(candidate))
-                {
-                    return File.ReadAllText(candidate).Trim();
-                }
-            }
-            catch
-            {
-                // Token lookup is best-effort; update errors will explain missing access.
-            }
-        }
-
-        return "";
     }
 
     private static void ApplyGitHubApiHeaders(HttpRequestMessage request)
@@ -390,7 +349,7 @@ public static class GitAutoUpdater
         {
             throw new InvalidOperationException(
                 $"GitHub could not {operation} (HTTP {(int)response.StatusCode}). "
-                + $"The updater runs without authorization prompts. Put a GitHub token with release read access into {UpdateKeyFileName} next to the app or into Data\\{UpdateKeyFileName}.");
+                + "Check internet access and the public Proxy Sentry CSV release channel.");
         }
 
         response.EnsureSuccessStatusCode();
