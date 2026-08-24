@@ -4,6 +4,7 @@ using System.Management;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -11,6 +12,14 @@ using System.Text.RegularExpressions;
 using ProxySentryCsv.Models;
 
 namespace ProxySentryCsv.Services;
+
+public sealed record BrowserLeaseResult(
+    string ProfileId,
+    string Browser,
+    int ProcessId,
+    int DebuggingPort,
+    string CdpEndpoint,
+    string ProfilePath);
 
 public sealed class SystemBrowserLauncher : IDisposable
 {
@@ -229,6 +238,194 @@ public sealed class SystemBrowserLauncher : IDisposable
             throw;
         }
 
+    }
+
+    public async Task<BrowserLeaseResult> EnsureChromeReadyForEventSentryAsync(
+        ProxyEntry proxy,
+        string runId,
+        bool background,
+        Action<string>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        const string provider = "chrome";
+        var profilePath = GetProfilePath(provider, proxy);
+
+        TrackedBrowser? tracked;
+        lock (_gate)
+        {
+            _running.TryGetValue(proxy.StableId, out tracked);
+        }
+
+        if (tracked is not null)
+        {
+            if (!tracked.Process.HasExited
+                && string.Equals(tracked.Provider, provider, StringComparison.OrdinalIgnoreCase)
+                && tracked.DebuggingPort is > 0
+                && await IsDevToolsEndpointAvailableAsync(tracked.DebuggingPort.Value, cancellationToken))
+            {
+                progress?.Invoke($"Event Sentry reused Chrome profile {proxy.ProfileKey}.");
+                if (background)
+                {
+                    PlaceBrowserInBackground(tracked.Process, progress);
+                }
+
+                return new BrowserLeaseResult(
+                    proxy.ProfileKey,
+                    provider,
+                    tracked.Process.Id,
+                    tracked.DebuggingPort.Value,
+                    $"http://127.0.0.1:{tracked.DebuggingPort.Value}",
+                    profilePath);
+            }
+
+            lock (_gate)
+            {
+                if (_running.TryGetValue(proxy.StableId, out var current) && ReferenceEquals(current, tracked))
+                {
+                    _running.Remove(proxy.StableId);
+                }
+            }
+
+            tracked.ProfileEmailResource?.Dispose();
+            tracked.DevToolsSession?.Dispose();
+            tracked.Relay.Dispose();
+        }
+
+        var executablePath = await ResolveBrowserExecutableAsync(provider, progress);
+        var browserVersion = GetBrowserVersion(executablePath);
+        var fingerprint = await _fingerprints.GetOrCreateAsync(proxy, provider, browserVersion.Major, progress);
+        ApplyFingerprintGeo(proxy, fingerprint);
+        ApplyChromiumBrowserVersion(fingerprint, provider, browserVersion.FullVersion);
+
+        var extensionProfilePath = GetExtensionProfilePath(provider, proxy);
+        Directory.CreateDirectory(profilePath);
+        Directory.CreateDirectory(extensionProfilePath);
+
+        var relay = LocalProxyRelay.Start(proxy, progress);
+        IDisposable? devToolsSession = null;
+        IDisposable? profileEmailResource = null;
+        Process? process = null;
+        var debuggingPort = GetFreeLoopbackPort();
+
+        try
+        {
+            var windowLabel = GetWindowLabel(proxy);
+            var emailButtonEnabled = IsProfileEmailButtonEnabled(provider);
+            var profileEmail = emailButtonEnabled && !string.IsNullOrWhiteSpace(proxy.Email) ? proxy.Email : "";
+            var chromiumExtensionPaths = new List<string>();
+            if (!string.IsNullOrWhiteSpace(profileEmail))
+            {
+                chromiumExtensionPaths.Add(WriteChromiumProfileEmailExtension(extensionProfilePath, profileEmail, windowLabel));
+            }
+            chromiumExtensionPaths.AddRange(GetGlobalChromiumExtensionPaths(provider, progress));
+            var chromiumExtensionPath = string.Join(",", chromiumExtensionPaths);
+
+            RemoveChromiumBrowserForgeExtension(profilePath, extensionProfilePath, progress);
+            WriteChromiumPreferences(
+                profilePath,
+                fingerprint,
+                !string.IsNullOrWhiteSpace(profileEmail) ? ChromiumProfileEmailExtensionId : "");
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = executablePath,
+                WorkingDirectory = Path.GetDirectoryName(executablePath) ?? AppContext.BaseDirectory,
+                UseShellExecute = false
+            };
+            if (!string.IsNullOrWhiteSpace(fingerprint.TimeZone))
+            {
+                startInfo.Environment["TZ"] = fingerprint.TimeZone;
+            }
+
+            AddChromiumArguments(
+                startInfo,
+                profilePath,
+                "about:blank",
+                relay.Port,
+                fingerprint,
+                chromiumExtensionPath,
+                provider,
+                debuggingPort,
+                null);
+
+            progress?.Invoke($"Event Sentry launching Chrome profile {proxy.ProfileKey} for run {ShortRunId(runId)}.");
+            process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start Chrome.");
+            process.EnableRaisingEvents = true;
+            process.Exited += (_, _) => MarkClosed(proxy.StableId);
+            if (background)
+            {
+                PlaceBrowserInBackground(process, progress);
+            }
+
+            devToolsSession = await ApplyChromiumDevToolsOverridesAsync(
+                debuggingPort,
+                "about:blank",
+                fingerprint,
+                provider,
+                windowLabel,
+                SplitChromiumExtensionPaths(chromiumExtensionPath),
+                progress);
+
+            tracked = new TrackedBrowser(process, provider, relay, devToolsSession, debuggingPort, profileEmailResource);
+            lock (_gate)
+            {
+                _running[proxy.StableId] = tracked;
+            }
+
+            return new BrowserLeaseResult(
+                proxy.ProfileKey,
+                provider,
+                process.Id,
+                debuggingPort,
+                $"http://127.0.0.1:{debuggingPort}",
+                profilePath);
+        }
+        catch
+        {
+            try
+            {
+                if (process is not null && !process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+            }
+
+            profileEmailResource?.Dispose();
+            devToolsSession?.Dispose();
+            relay.Dispose();
+            throw;
+        }
+    }
+
+    public Task BringToFrontAsync(ProxyEntry proxy, CancellationToken cancellationToken = default)
+    {
+        TrackedBrowser? tracked;
+        lock (_gate)
+        {
+            _running.TryGetValue(proxy.StableId, out tracked);
+        }
+
+        if (tracked is null || tracked.Process.HasExited)
+        {
+            throw new InvalidOperationException("Chrome profile is not running.");
+        }
+
+        return Task.Run(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var handle = WaitForMainWindowHandle(tracked.Process, TimeSpan.FromSeconds(2));
+            if (handle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Chrome window handle was not found.");
+            }
+
+            ShowWindow(handle, ShowWindowRestore);
+            SetWindowPos(handle, HwndTop, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpShowWindow);
+            SetForegroundWindow(handle);
+        }, cancellationToken);
     }
 
     public async Task CloseAsync(ProxyEntry proxy, CancellationToken cancellationToken = default)
@@ -2592,6 +2789,74 @@ emailElement.addEventListener("click", copyEmail);
             : $"{locale},{language},en";
     }
 
+    private static async Task<bool> IsDevToolsEndpointAvailableAsync(int debuggingPort, CancellationToken cancellationToken)
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+        try
+        {
+            using var response = await client.GetAsync($"http://127.0.0.1:{debuggingPort}/json/version", cancellationToken);
+            return response.IsSuccessStatusCode;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void PlaceBrowserInBackground(Process process, Action<string>? progress)
+    {
+        try
+        {
+            var handle = WaitForMainWindowHandle(process, TimeSpan.FromSeconds(3));
+            if (handle == IntPtr.Zero)
+            {
+                progress?.Invoke("Event Sentry background placement skipped: Chrome window handle was not ready.");
+                return;
+            }
+
+            SetWindowPos(handle, HwndBottom, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpShowWindow);
+        }
+        catch (Exception ex)
+        {
+            progress?.Invoke($"Event Sentry background placement skipped: {ex.Message}");
+        }
+    }
+
+    private static IntPtr WaitForMainWindowHandle(Process process, TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            try
+            {
+                if (process.HasExited)
+                {
+                    return IntPtr.Zero;
+                }
+
+                process.Refresh();
+                if (process.MainWindowHandle != IntPtr.Zero)
+                {
+                    return process.MainWindowHandle;
+                }
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
+
+            Thread.Sleep(100);
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private static string ShortRunId(string? runId)
+    {
+        var value = (runId ?? "").Trim();
+        return value.Length <= 12 ? value : value[..12];
+    }
+
     private void MarkClosed(string stableId)
     {
         TrackedBrowser? tracked = null;
@@ -2621,5 +2886,22 @@ emailElement.addEventListener("click", copyEmail);
         IDisposable? ProfileEmailResource);
 
     private sealed record BrowserVersion(int? Major, string? FullVersion);
+
+    private static readonly IntPtr HwndTop = new(0);
+    private static readonly IntPtr HwndBottom = new(1);
+    private const int ShowWindowRestore = 9;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpNoActivate = 0x0010;
+    private const uint SwpShowWindow = 0x0040;
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hwnd, int command);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
 
 }

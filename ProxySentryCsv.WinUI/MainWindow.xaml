@@ -25,8 +25,14 @@
             <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <Button x:Name="OpenCsvButton" Click="OpenCsv_Click" Content="Open list" />
-                    <Button x:Name="ExportAdsButton" Click="ExportAds_Click" Content="Export ADS" />
-                    <Button x:Name="ExportTxtButton" Click="ExportTxt_Click" Content="Export TXT" />
+                    <Button x:Name="ExportButton" Content="Export">
+                        <Button.Flyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Click="ExportAds_Click" Text="Export ADS" />
+                                <MenuFlyoutItem Click="ExportTxt_Click" Text="Export TXT" />
+                            </MenuFlyout>
+                        </Button.Flyout>
+                    </Button>
                     <Button x:Name="CheckAllButton" Click="CheckAll_Click" Content="Check all" />
                     <Button x:Name="SortButton" Content="Sort">
                         <Button.Flyout>
@@ -43,12 +49,6 @@
                     <Button x:Name="SettingsButton" Click="Settings_Click" Content="Settings" />
                     <Button x:Name="CheckUpdatesButton" Click="CheckUpdates_Click" Content="Check updates" />
                     <Button x:Name="AboutButton" Click="About_Click" Content="About" />
-                    <TextBlock
-                        x:Name="SummaryText"
-                        MinWidth="320"
-                        VerticalAlignment="Center"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="No list loaded" />
                 </StackPanel>
             </ScrollViewer>
 
@@ -87,6 +87,17 @@
                         DisplayMemberPath="DisplayName"
                         PlaceholderText="Sync monitor"
                         SelectionChanged="SyncMonitorBox_SelectionChanged" />
+                    <Button
+                        x:Name="SelectEventSentryButton"
+                        Click="SelectForEventSentry_Click"
+                        Content="Select for Event Sentry" />
+                    <TextBlock
+                        x:Name="EventSentryBridgeText"
+                        MinWidth="230"
+                        VerticalAlignment="Center"
+                        FontWeight="SemiBold"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="Event Sentry bridge: Starting" />
                 </StackPanel>
             </ScrollViewer>
         </Grid>
@@ -181,6 +192,7 @@
                     </ListView.ItemContainerStyle>
                     <ListView.Header>
                         <Grid
+                            x:Name="ProxyHeaderGrid"
                             MinWidth="1660"
                             Padding="10,8"
                             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
@@ -202,19 +214,161 @@
                                 <ColumnDefinition Width="242" />
                             </Grid.ColumnDefinitions>
 
-                            <TextBlock FontWeight="SemiBold" Text="#" />
-                            <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="Select" />
-                            <TextBlock Grid.Column="2" FontWeight="SemiBold" Text="Name" />
-                            <TextBlock Grid.Column="3" FontWeight="SemiBold" Text="Browser" />
-                            <TextBlock Grid.Column="4" FontWeight="SemiBold" Text="Group" />
-                            <TextBlock Grid.Column="5" FontWeight="SemiBold" Text="Proxy" />
-                            <TextBlock Grid.Column="6" FontWeight="SemiBold" Text="Region" />
-                            <TextBlock Grid.Column="7" FontWeight="SemiBold" Text="Ping" />
-                            <TextBlock Grid.Column="8" FontWeight="SemiBold" Text="Resp" />
-                            <TextBlock Grid.Column="9" FontWeight="SemiBold" Text="Used" />
-                            <TextBlock Grid.Column="10" FontWeight="SemiBold" Text="Status" />
-                            <TextBlock Grid.Column="11" FontWeight="SemiBold" Text="Favorite" />
-                            <TextBlock Grid.Column="12" FontWeight="SemiBold" Text="Actions" />
+                            <Grid
+                                Tag="0"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="#" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="1"
+                                Tag="1"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Select" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="2"
+                                Tag="2"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Name" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="3"
+                                Tag="3"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Browser" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="4"
+                                Tag="4"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Group" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="5"
+                                Tag="5"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Proxy" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="6"
+                                Tag="6"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Region" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="7"
+                                Tag="7"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Ping" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="8"
+                                Tag="8"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Resp" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="9"
+                                Tag="9"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Used" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="10"
+                                Tag="10"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Status" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="11"
+                                Tag="11"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Favorite" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                Grid.Column="12"
+                                Tag="12"
+                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
+                                PointerMoved="ProxyColumnHeader_PointerMoved"
+                                PointerPressed="ProxyColumnHeader_PointerPressed"
+                                PointerReleased="ProxyColumnHeader_PointerReleased">
+                                <TextBlock FontWeight="SemiBold" Text="Actions" />
+                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
+                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                            </Grid>
                         </Grid>
                     </ListView.Header>
                     <ListView.ItemTemplate>
@@ -223,7 +377,9 @@
                                 MinWidth="1660"
                                 Padding="10,6"
                                 Background="{Binding RowBackground}"
-                                ColumnSpacing="10">
+                                ColumnSpacing="10"
+                                Loaded="ProxyRowGrid_Loaded"
+                                Unloaded="ProxyRowGrid_Unloaded">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="48" />
                                     <ColumnDefinition Width="72" />

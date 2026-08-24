@@ -4,6 +4,7 @@ obj/
 .vscode/
 release/
 release-next/
+references/
 *.user
 *.suo
 *.userosscache

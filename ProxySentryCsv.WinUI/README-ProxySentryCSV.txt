@@ -40,6 +40,19 @@ Selection and sync:
   Open sync group, Start sync, Stop sync, and Align selected apply to selected Jancy controlled windows or Chrome DevTools windows.
   Sync includes navigation, mouse movement, clicks, wheel, scroll, text input, and keyboard input.
 
+Event Sentry bridge:
+  Mark persistent Chrome profiles with the Event checkbox in the proxy table.
+  Proxy Sentry CSV starts a local Named Pipe bridge:
+    ProxySentryCSV.EventSentry.v1
+  The bridge accepts one UTF-8 JSON request per connection and returns one JSON response.
+  Supported commands are status, acquire_etix_profiles, set_profile_status,
+  bring_to_front, and release_etix_profiles.
+  Event Sentry receives only profile id, row/display metadata, process id, state,
+  browser name, and the loopback CDP endpoint. Proxy server, username, and password
+  are never returned through the bridge.
+  acquire_etix_profiles starts or reuses persistent Chrome profiles and keeps them
+  open on release when keepOpen is true.
+
 Updates:
   Check updates uses the built-in GitHub Releases channel:
     https://api.github.com/repos/rockstar203-ne/proxy-sentry-csv/releases/latest

@@ -18,12 +18,16 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     private bool _copied;
     private bool _isFavorite;
     private bool _syncSelected;
+    private bool _useForEventSentry;
     private string _displayName = "";
     private string _browserProvider = "chrome";
     private string _countryCode = "";
     private string _region = "";
     private string _city = "";
     private string _email = "";
+    private string _eventSentryState = "Closed";
+    private string _eventSentryRunId = "";
+    private DateTimeOffset? _eventSentryHeartbeat;
     private int _listNumber;
 
     public int RowNumber { get; set; }
@@ -275,6 +279,21 @@ public sealed class ProxyEntry : INotifyPropertyChanged
         }
     }
 
+    public bool UseForEventSentry
+    {
+        get => _useForEventSentry;
+        set
+        {
+            if (_useForEventSentry == value)
+            {
+                return;
+            }
+
+            _useForEventSentry = value;
+            OnPropertyChanged();
+        }
+    }
+
     public bool IsOpen
     {
         get => _isOpen;
@@ -339,6 +358,58 @@ public sealed class ProxyEntry : INotifyPropertyChanged
             OnPropertyChanged();
         }
     }
+
+    public string EventSentryState
+    {
+        get => _eventSentryState;
+        set
+        {
+            var next = string.IsNullOrWhiteSpace(value) ? "Closed" : value.Trim();
+            if (_eventSentryState == next)
+            {
+                return;
+            }
+
+            _eventSentryState = next;
+            OnPropertyChanged();
+        }
+    }
+
+    public string EventSentryRunId
+    {
+        get => _eventSentryRunId;
+        set
+        {
+            var next = (value ?? "").Trim();
+            if (_eventSentryRunId == next)
+            {
+                return;
+            }
+
+            _eventSentryRunId = next;
+            OnPropertyChanged();
+        }
+    }
+
+    public DateTimeOffset? EventSentryHeartbeat
+    {
+        get => _eventSentryHeartbeat;
+        set
+        {
+            if (_eventSentryHeartbeat == value)
+            {
+                return;
+            }
+
+            _eventSentryHeartbeat = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(EventSentryHeartbeatText));
+        }
+    }
+
+    public string EventSentryHeartbeatText => EventSentryHeartbeat.HasValue
+        ? EventSentryHeartbeat.Value.ToLocalTime().ToString("HH:mm:ss")
+        : "-";
 
     public int? PingMs
     {

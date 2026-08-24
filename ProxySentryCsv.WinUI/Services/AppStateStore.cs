@@ -35,6 +35,7 @@ public sealed class AppStateStore
                 Used = proxy.Used,
                 Copied = proxy.Copied,
                 IsFavorite = proxy.IsFavorite,
+                UseForEventSentry = proxy.UseForEventSentry,
                 PingMs = proxy.PingMs,
                 ResponseMs = proxy.ResponseMs,
                 SpeedGroup = proxy.SpeedGroup,
@@ -96,6 +97,7 @@ public sealed class AppStateStore
         public bool ShowChromeEmailButton { get; set; }
         public bool ShowEdgeEmailButton { get; set; }
         public bool ShowFirefoxEmailButton { get; set; }
+        public List<double> ProxyTableColumnWidths { get; set; } = [];
         public List<BrowserExtensionEntry> GlobalExtensions { get; set; } = [];
     }
 
@@ -105,6 +107,7 @@ public sealed class AppStateStore
         public bool Used { get; set; }
         public bool Copied { get; set; }
         public bool IsFavorite { get; set; }
+        public bool UseForEventSentry { get; set; }
         public int? PingMs { get; set; }
         public int? ResponseMs { get; set; }
         public string SpeedGroup { get; set; } = "Unchecked";

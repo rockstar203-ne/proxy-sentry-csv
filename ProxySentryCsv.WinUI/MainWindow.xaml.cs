@@ -26,6 +26,7 @@ public sealed partial class MainWindow : Window
     private readonly BrowserCacheService _browserCache;
     private readonly BrowserExtensionStore _extensionStore;
     private readonly ProxySpeedChecker _proxySpeedChecker = new();
+    private readonly EventSentryBridgeServer _eventSentryBridge;
     private AppWindow? _appWindow;
     private ProxyListEntry? _activeList;
     private ProxyListEntry? _favoritesList;
@@ -42,6 +43,15 @@ public sealed partial class MainWindow : Window
     private bool _showChromeEmailButton;
     private bool _showEdgeEmailButton;
     private bool _showFirefoxEmailButton;
+    private const double ProxyColumnMinWidth = 44;
+    private const double ProxyColumnResizeHitWidth = 14;
+    private const double ProxyTablePaddingWidth = 20;
+    private const double ProxyTableColumnSpacing = 10;
+    private readonly double[] _defaultProxyColumnWidths = [48, 72, 150, 114, 92, 170, 190, 78, 78, 72, 130, 88, 242];
+    private readonly List<WeakReference<Grid>> _proxyRowGridRefs = [];
+    private int _resizingProxyColumnIndex = -1;
+    private double _resizeStartX;
+    private double _resizeStartWidth;
 
     public ObservableCollection<ProxyEntry> Proxies { get; } = [];
     public ObservableCollection<ProxyListEntry> ProxyLists { get; } = [];
@@ -59,12 +69,22 @@ public sealed partial class MainWindow : Window
         _systemBrowserLauncher = new SystemBrowserLauncher(_appDataPath, _browserForgeFingerprints);
         _jancyLauncher = new JancyLauncher(_appDataPath);
         _systemBrowserLauncher.ProfilesClosed += SystemBrowserLauncher_ProfilesClosed;
+        _eventSentryBridge = new EventSentryBridgeServer(
+            DispatcherQueue,
+            () => GetAllLoadedProxies().ToList(),
+            _systemBrowserLauncher,
+            line => DispatcherQueue.TryEnqueue(() => ShowMessage(line, InfoBarSeverity.Informational)),
+            () => DispatcherQueue.TryEnqueue(() => SaveState()),
+            () => DispatcherQueue.TryEnqueue(() => UpdateSummary()));
+        _eventSentryBridge.StateChanged += () => DispatcherQueue.TryEnqueue(UpdateEventSentryBridgeIndicator);
         InitializeWindowChrome();
         _suppressStateSave = true;
         InitializeSyncMonitors();
         RestoreSavedState();
         _suppressStateSave = false;
         Closed += MainWindow_Closed;
+        _eventSentryBridge.Start();
+        UpdateEventSentryBridgeIndicator();
         _ = RefreshCacheSizeAsync();
     }
 
@@ -884,9 +904,17 @@ Jancy setup:
                 {
                     proxy.Status = "Closed";
                 }
+                if (!string.Equals(proxy.EventSentryState, "Cleanup required", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(proxy.EventSentryState, "Blocked", StringComparison.OrdinalIgnoreCase))
+                {
+                    proxy.EventSentryState = "Closed";
+                }
+                proxy.EventSentryRunId = "";
+                proxy.EventSentryHeartbeat = null;
                 proxy.OpenedProvider = "";
                 ClearClosedProxySelection(proxy);
             }
+            UpdateEventSentryBridgeIndicator();
         });
     }
 
@@ -1024,6 +1052,11 @@ Jancy setup:
         SortButton.IsEnabled = false;
         OpenCsvButton.IsEnabled = false;
         var checkAllContent = CheckAllButton.Content;
+        var checkStatusText = new TextBlock
+        {
+            Text = "Checking...",
+            VerticalAlignment = VerticalAlignment.Center
+        };
         CheckAllButton.Content = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -1036,11 +1069,7 @@ Jancy setup:
                     Width = 16,
                     Height = 16
                 },
-                new TextBlock
-                {
-                    Text = "Checking...",
-                    VerticalAlignment = VerticalAlignment.Center
-                }
+                checkStatusText
             }
         };
 
@@ -1073,7 +1102,9 @@ Jancy setup:
                         proxy.SpeedGroup = result.SpeedGroup;
                         proxy.Status = result.Status;
                         completed++;
-                        SummaryText.Text = $"Checked {completed}/{snapshot.Count}";
+                        checkStatusText.Text = $"Checked {completed}/{snapshot.Count}";
+                        LogTitleText.Text = "Check";
+                        LogText.Text = $"Checked {completed}/{snapshot.Count}";
                     });
                 }
                 catch
@@ -1083,7 +1114,9 @@ Jancy setup:
                         proxy.SpeedGroup = "Dead";
                         proxy.Status = "Dead";
                         completed++;
-                        SummaryText.Text = $"Checked {completed}/{snapshot.Count}";
+                        checkStatusText.Text = $"Checked {completed}/{snapshot.Count}";
+                        LogTitleText.Text = "Check";
+                        LogText.Text = $"Checked {completed}/{snapshot.Count}";
                     });
                 }
                 try
@@ -1299,6 +1332,7 @@ Jancy setup:
         proxy.Used = savedState.Used;
         proxy.Copied = savedState.Copied;
         proxy.IsFavorite = savedState.IsFavorite;
+        proxy.UseForEventSentry = savedState.UseForEventSentry;
         proxy.PingMs = savedState.PingMs;
         proxy.ResponseMs = savedState.ResponseMs;
         proxy.SpeedGroup = savedState.SpeedGroup;
@@ -1346,6 +1380,7 @@ Jancy setup:
                 ShowChromeEmailButton = _showChromeEmailButton,
                 ShowEdgeEmailButton = _showEdgeEmailButton,
                 ShowFirefoxEmailButton = _showFirefoxEmailButton,
+                ProxyTableColumnWidths = CaptureProxyColumnWidths(),
                 GlobalExtensions = GlobalExtensions.ToList()
             });
     }
@@ -1365,6 +1400,7 @@ Jancy setup:
         _showChromeEmailButton = settings.ShowChromeEmailButton;
         _showEdgeEmailButton = settings.ShowEdgeEmailButton;
         _showFirefoxEmailButton = settings.ShowFirefoxEmailButton;
+        RestoreProxyColumnWidths(settings.ProxyTableColumnWidths);
         ApplyBrowserEmailButtonSettings();
         GlobalExtensions.Clear();
         foreach (var extension in settings.GlobalExtensions)
@@ -1411,6 +1447,245 @@ Jancy setup:
         {
             UpdateSummary();
         }
+    }
+
+    private void RestoreProxyColumnWidths(IReadOnlyList<double>? savedWidths)
+    {
+        var widths = NormalizeProxyColumnWidths(savedWidths);
+        ApplyProxyColumnWidths(ProxyHeaderGrid, widths);
+        ApplyProxyColumnWidthsToRows(widths);
+        UpdateProxyTableMinWidths(widths);
+    }
+
+    private List<double> CaptureProxyColumnWidths()
+    {
+        if (ProxyHeaderGrid is null)
+        {
+            return _defaultProxyColumnWidths.ToList();
+        }
+
+        var widths = new List<double>(_defaultProxyColumnWidths.Length);
+        for (var index = 0; index < _defaultProxyColumnWidths.Length; index++)
+        {
+            var width = index < ProxyHeaderGrid.ColumnDefinitions.Count
+                ? ProxyHeaderGrid.ColumnDefinitions[index].Width.Value
+                : _defaultProxyColumnWidths[index];
+            widths.Add(NormalizeProxyColumnWidth(index, width));
+        }
+
+        return widths;
+    }
+
+    private List<double> NormalizeProxyColumnWidths(IReadOnlyList<double>? savedWidths)
+    {
+        var widths = new List<double>(_defaultProxyColumnWidths.Length);
+        for (var index = 0; index < _defaultProxyColumnWidths.Length; index++)
+        {
+            var width = savedWidths is not null && index < savedWidths.Count
+                ? savedWidths[index]
+                : _defaultProxyColumnWidths[index];
+            widths.Add(NormalizeProxyColumnWidth(index, width));
+        }
+
+        return widths;
+    }
+
+    private double NormalizeProxyColumnWidth(int index, double width)
+    {
+        var fallback = index >= 0 && index < _defaultProxyColumnWidths.Length
+            ? _defaultProxyColumnWidths[index]
+            : ProxyColumnMinWidth;
+        if (double.IsNaN(width) || double.IsInfinity(width) || width <= 0)
+        {
+            width = fallback;
+        }
+
+        return Math.Max(ProxyColumnMinWidth, width);
+    }
+
+    private void ProxyRowGrid_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Grid grid)
+        {
+            return;
+        }
+
+        _proxyRowGridRefs.RemoveAll(reference => !reference.TryGetTarget(out var target) || ReferenceEquals(target, grid));
+        _proxyRowGridRefs.Add(new WeakReference<Grid>(grid));
+        ApplyProxyColumnWidths(grid, CaptureProxyColumnWidths());
+    }
+
+    private void ProxyRowGrid_Unloaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Grid grid)
+        {
+            return;
+        }
+
+        _proxyRowGridRefs.RemoveAll(reference => !reference.TryGetTarget(out var target) || ReferenceEquals(target, grid));
+    }
+
+    private void ProxyColumnHeader_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement header || !TryGetProxyColumnIndex(header, out var index))
+        {
+            return;
+        }
+
+        var headerPoint = e.GetCurrentPoint(header);
+        if (header.ActualWidth - headerPoint.Position.X > ProxyColumnResizeHitWidth)
+        {
+            return;
+        }
+
+        _resizingProxyColumnIndex = index;
+        _resizeStartX = e.GetCurrentPoint(Root).Position.X;
+        _resizeStartWidth = GetProxyColumnWidth(index);
+        header.CapturePointer(e.Pointer);
+        e.Handled = true;
+    }
+
+    private void ProxyColumnHeader_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_resizingProxyColumnIndex < 0)
+        {
+            return;
+        }
+
+        var delta = e.GetCurrentPoint(Root).Position.X - _resizeStartX;
+        SetProxyColumnWidth(_resizingProxyColumnIndex, _resizeStartWidth + delta);
+        e.Handled = true;
+    }
+
+    private void ProxyColumnHeader_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        FinishProxyColumnResize(sender as FrameworkElement, e);
+    }
+
+    private void ProxyColumnHeader_PointerCanceled(object sender, PointerRoutedEventArgs e)
+    {
+        FinishProxyColumnResize(sender as FrameworkElement, e);
+    }
+
+    private void FinishProxyColumnResize(FrameworkElement? header, PointerRoutedEventArgs e)
+    {
+        if (_resizingProxyColumnIndex < 0)
+        {
+            return;
+        }
+
+        header?.ReleasePointerCapture(e.Pointer);
+        _resizingProxyColumnIndex = -1;
+        SaveState();
+        e.Handled = true;
+    }
+
+    private bool TryGetProxyColumnIndex(FrameworkElement element, out int index)
+    {
+        return int.TryParse(element.Tag?.ToString(), out index)
+            && index >= 0
+            && index < _defaultProxyColumnWidths.Length;
+    }
+
+    private double GetProxyColumnWidth(int index)
+    {
+        if (ProxyHeaderGrid is not null && index >= 0 && index < ProxyHeaderGrid.ColumnDefinitions.Count)
+        {
+            return NormalizeProxyColumnWidth(index, ProxyHeaderGrid.ColumnDefinitions[index].Width.Value);
+        }
+
+        return NormalizeProxyColumnWidth(index, _defaultProxyColumnWidths.ElementAtOrDefault(index));
+    }
+
+    private void SetProxyColumnWidth(int index, double width)
+    {
+        if (index < 0 || index >= _defaultProxyColumnWidths.Length)
+        {
+            return;
+        }
+
+        width = NormalizeProxyColumnWidth(index, width);
+        SetGridColumnWidth(ProxyHeaderGrid, index, width);
+
+        _proxyRowGridRefs.RemoveAll(reference =>
+        {
+            if (!reference.TryGetTarget(out var grid))
+            {
+                return true;
+            }
+
+            SetGridColumnWidth(grid, index, width);
+            return false;
+        });
+
+        UpdateProxyTableMinWidths(CaptureProxyColumnWidths());
+    }
+
+    private void ApplyProxyColumnWidthsToRows(IReadOnlyList<double> widths)
+    {
+        _proxyRowGridRefs.RemoveAll(reference =>
+        {
+            if (!reference.TryGetTarget(out var grid))
+            {
+                return true;
+            }
+
+            ApplyProxyColumnWidths(grid, widths);
+            return false;
+        });
+    }
+
+    private void ApplyProxyColumnWidths(Grid? grid, IReadOnlyList<double> widths)
+    {
+        if (grid is null)
+        {
+            return;
+        }
+
+        for (var index = 0; index < _defaultProxyColumnWidths.Length && index < grid.ColumnDefinitions.Count; index++)
+        {
+            SetGridColumnWidth(grid, index, widths[index]);
+        }
+
+        grid.MinWidth = CalculateProxyTableWidth(widths);
+    }
+
+    private static void SetGridColumnWidth(Grid? grid, int index, double width)
+    {
+        if (grid is null || index < 0 || index >= grid.ColumnDefinitions.Count)
+        {
+            return;
+        }
+
+        grid.ColumnDefinitions[index].Width = new GridLength(width);
+    }
+
+    private void UpdateProxyTableMinWidths(IReadOnlyList<double> widths)
+    {
+        var minWidth = CalculateProxyTableWidth(widths);
+        ProxyList.MinWidth = minWidth;
+        if (ProxyHeaderGrid is not null)
+        {
+            ProxyHeaderGrid.MinWidth = minWidth;
+        }
+
+        _proxyRowGridRefs.RemoveAll(reference =>
+        {
+            if (!reference.TryGetTarget(out var grid))
+            {
+                return true;
+            }
+
+            grid.MinWidth = minWidth;
+            return false;
+        });
+    }
+
+    private double CalculateProxyTableWidth(IReadOnlyList<double> widths)
+    {
+        return widths.Sum()
+            + Math.Max(0, widths.Count - 1) * ProxyTableColumnSpacing
+            + ProxyTablePaddingWidth;
     }
 
     private void InitializeSyncMonitors()
@@ -1586,6 +1861,47 @@ Jancy setup:
         ShowSelectionSummary();
     }
 
+    private void SelectForEventSentry_Click(object sender, RoutedEventArgs e)
+    {
+        var current = GetAllLoadedProxies().Where(proxy => proxy.UseForEventSentry).ToList();
+        if (current.Count > 0)
+        {
+            foreach (var proxy in current)
+            {
+                proxy.UseForEventSentry = false;
+            }
+
+            SaveState();
+            UpdateSummary();
+            ShowMessage($"Event Sentry proxy selection cleared: {current.Count}.", InfoBarSeverity.Success);
+            return;
+        }
+
+        var targets = GetAllLoadedProxies().Where(proxy => proxy.SyncSelected).ToList();
+
+        if (targets.Count == 0)
+        {
+            ShowMessage("Check rows in the Select column first, then press Select for Event Sentry.", InfoBarSeverity.Warning);
+            return;
+        }
+
+        var selectedIds = targets
+            .Select(proxy => proxy.StableId)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var proxy in GetAllLoadedProxies())
+        {
+            proxy.UseForEventSentry = selectedIds.Contains(proxy.StableId);
+            if (proxy.UseForEventSentry)
+            {
+                proxy.BrowserProvider = "chrome";
+            }
+        }
+
+        SaveState();
+        UpdateSummary();
+        ShowMessage($"Event Sentry profiles selected: {targets.Count}.", InfoBarSeverity.Success);
+    }
+
     private List<ProxyEntry> GetSyncSelectedProxies()
     {
         var checkedRows = GetAllLoadedProxies().Where(proxy => proxy.SyncSelected).ToList();
@@ -1607,7 +1923,8 @@ Jancy setup:
         }
 
         var suffix = string.IsNullOrWhiteSpace(rows) ? "" : $". Rows: {rows}";
-        ShowMessage($"Selected proxies: {selected.Count}. Sync selected: {syncSelected.Count}{suffix}", InfoBarSeverity.Informational);
+        var eventSentrySelected = GetAllLoadedProxies().Count(proxy => proxy.UseForEventSentry);
+        ShowMessage($"Selected proxies: {selected.Count}. Sync selected: {syncSelected.Count}. Event Sentry: {eventSentrySelected}{suffix}", InfoBarSeverity.Informational);
     }
 
     private void ClearClosedProxySelection(ProxyEntry proxy)
@@ -1732,17 +2049,27 @@ Jancy setup:
 
     private void UpdateSummary(string? fileName = null)
     {
-        var used = GetAllLoadedProxies().Count(proxy => proxy.Used);
-        var copied = GetAllLoadedProxies().Count(proxy => proxy.Copied);
-        var favorites = GetAllLoadedProxies().Count(proxy => proxy.IsFavorite);
-        var fast = Proxies.Count(proxy => proxy.SpeedGroup == "Fast");
-        var good = Proxies.Count(proxy => proxy.SpeedGroup == "Good");
-        var slow = Proxies.Count(proxy => proxy.SpeedGroup == "Slow");
-        var dead = Proxies.Count(proxy => proxy.SpeedGroup == "Dead");
-        var prefix = fileName ?? _activeList?.Name ?? "Loaded";
-        SummaryText.Text = Proxies.Count == 0
-            ? "No list loaded"
-            : $"{prefix}: {Proxies.Count} shown, {used} used, {copied} copied, {favorites} favorites, {fast}/{good}/{slow}/{dead} fast/good/slow/dead";
+        UpdateEventSentryBridgeIndicator();
+    }
+
+    private void UpdateEventSentryBridgeIndicator()
+    {
+        if (EventSentryBridgeText is null)
+        {
+            return;
+        }
+
+        var selected = GetAllLoadedProxies().Count(proxy => proxy.UseForEventSentry);
+        if (SelectEventSentryButton is not null)
+        {
+            SelectEventSentryButton.Content = selected > 0
+                ? $"Event Sentry: {selected} selected - Clear"
+                : "Select for Event Sentry";
+        }
+
+        EventSentryBridgeText.Text = _eventSentryBridge.IsRunning
+            ? "Event Sentry bridge: Running"
+            : "Event Sentry bridge: Stopped";
     }
 
     private async Task RefreshCacheSizeAsync()
@@ -2659,6 +2986,7 @@ Jancy setup:
     private void MainWindow_Closed(object sender, WindowEventArgs args)
     {
         SaveState();
+        _eventSentryBridge.Dispose();
         _systemBrowserLauncher.Dispose();
     }
 
