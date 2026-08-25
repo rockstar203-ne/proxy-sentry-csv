@@ -212,7 +212,7 @@ public static class GitAutoUpdater
 
     private static void StartInstaller(string updateRoot, string packagePath, Action<string>? log)
     {
-        var updaterRunPath = PrepareUpdaterRunner(updateRoot);
+        var updaterRunPath = PrepareUpdaterRunner(updateRoot, packagePath, log);
         var logPath = Path.Combine(updateRoot, "Data", "updates", "updater.log");
         var launchPath = Path.Combine(updateRoot, RootLauncherName);
 
@@ -238,7 +238,7 @@ public static class GitAutoUpdater
 
     private static void StartRollback(string updateRoot, string backupPath, Action<string>? log)
     {
-        var updaterRunPath = PrepareUpdaterRunner(updateRoot);
+        var updaterRunPath = PrepareUpdaterRunner(updateRoot, null, log);
         var logPath = Path.Combine(updateRoot, "Data", "updates", "updater.log");
         var launchPath = Path.Combine(updateRoot, RootLauncherName);
 
@@ -263,19 +263,50 @@ public static class GitAutoUpdater
         Process.Start(startInfo);
     }
 
-    private static string PrepareUpdaterRunner(string updateRoot)
+    private static string PrepareUpdaterRunner(string updateRoot, string? packagePath, Action<string>? log)
     {
-        var source = ResolveUpdaterSourcePath(updateRoot);
-        if (!File.Exists(source))
-        {
-            throw new FileNotFoundException("ProxySentryCsv.Updater.exe was not found in the application components.", source);
-        }
-
         var runDirectory = Path.Combine(updateRoot, "Data", "updates", "runner");
         Directory.CreateDirectory(runDirectory);
         var runPath = Path.Combine(runDirectory, UpdaterExeName);
-        File.Copy(source, runPath, overwrite: true);
-        return runPath;
+
+        var source = ResolveUpdaterSourcePath(updateRoot);
+        if (File.Exists(source))
+        {
+            File.Copy(source, runPath, overwrite: true);
+            return runPath;
+        }
+
+        if (!string.IsNullOrWhiteSpace(packagePath) && File.Exists(packagePath))
+        {
+            log?.Invoke("Local updater is missing; extracting updater from the downloaded package.");
+            if (TryExtractUpdaterFromPackage(packagePath, runPath))
+            {
+                return runPath;
+            }
+        }
+
+        throw new FileNotFoundException(
+            "ProxySentryCsv.Updater.exe was not found in the application components or in the downloaded update package.",
+            source);
+    }
+
+    private static bool TryExtractUpdaterFromPackage(string packagePath, string runPath)
+    {
+        using var archive = ZipFile.OpenRead(packagePath);
+        var updaterEntry = archive.Entries.FirstOrDefault(entry =>
+        {
+            var name = entry.FullName.Replace('\\', '/');
+            return name.EndsWith($"/components/{UpdaterExeName}", StringComparison.OrdinalIgnoreCase)
+                || name.Equals($"components/{UpdaterExeName}", StringComparison.OrdinalIgnoreCase);
+        });
+
+        if (updaterEntry is null)
+        {
+            return false;
+        }
+
+        updaterEntry.ExtractToFile(runPath, overwrite: true);
+        return true;
     }
 
     private static string ResolveUpdaterSourcePath(string updateRoot)
