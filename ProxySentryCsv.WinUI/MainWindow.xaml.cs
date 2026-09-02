@@ -41,6 +41,7 @@ public sealed partial class MainWindow : Window
     private bool _syncingTargetUrlSelection;
     private bool _useTargetUrlList;
     private bool _disableTargetUrlAutoAdvance;
+    private CancellationTokenSource? _checkAllCancellation;
     private List<string> _lastJancySyncStableIds = [];
     private List<string> _lastChromeSyncStableIds = [];
     private int _syncClickDelayMs;
@@ -51,7 +52,7 @@ public sealed partial class MainWindow : Window
     private const double ProxyColumnResizeHitWidth = 14;
     private const double ProxyTablePaddingWidth = 20;
     private const double ProxyTableColumnSpacing = 10;
-    private readonly double[] _defaultProxyColumnWidths = [48, 72, 150, 114, 92, 170, 190, 78, 78, 72, 130, 88, 242];
+    private readonly double[] _defaultProxyColumnWidths = [48, 72, 150, 114, 92, 170, 190, 135, 72, 130, 88, 242];
     private readonly List<WeakReference<Grid>> _proxyRowGridRefs = [];
     private int _resizingProxyColumnIndex = -1;
     private double _resizeStartX;
@@ -504,6 +505,40 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private async void PasteTargetUrl_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var clipboardContent = Clipboard.GetContent();
+            if (!clipboardContent.Contains(StandardDataFormats.Text))
+            {
+                ShowMessage("Clipboard does not contain text.", InfoBarSeverity.Warning);
+                return;
+            }
+
+            var text = (await clipboardContent.GetTextAsync()).Trim();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                ShowMessage("Clipboard text is empty.", InfoBarSeverity.Warning);
+                return;
+            }
+
+            if (_useTargetUrlList)
+            {
+                SelectTargetUrlMode(false);
+            }
+
+            TargetUrlBox.Text = text;
+            UpdateTargetUrlControls();
+            SaveState();
+            ShowMessage("Target URL replaced from clipboard.", InfoBarSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            ShowMessage($"Could not read clipboard: {ex.Message}", InfoBarSeverity.Error);
+        }
+    }
+
     private string? ResolveTargetUrlForBrowserAction(bool showMessages = true)
     {
         string rawUrl;
@@ -743,6 +778,7 @@ public sealed partial class MainWindow : Window
 
         var listMode = _useTargetUrlList;
         var listVisibility = listMode ? Visibility.Visible : Visibility.Collapsed;
+        TargetUrlContainerBorder.Padding = listMode ? new Thickness(12) : new Thickness(8);
         TargetUrlBox.IsReadOnly = listMode;
         TargetUrlListControlsPanel.Visibility = listVisibility;
         TargetUrlListBox.Visibility = listVisibility;
@@ -1292,13 +1328,13 @@ Jancy setup:
             Text = text,
             TextWrapping = TextWrapping.WrapWholeWords,
             IsTextSelectionEnabled = true,
-            Width = 430
+            Width = 560
         };
 
         var content = new ScrollViewer
         {
-            Width = 450,
-            MaxHeight = 360,
+            Width = 600,
+            MaxHeight = 520,
             Padding = new Thickness(0, 0, 8, 0),
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
@@ -1477,6 +1513,11 @@ Jancy setup:
         CheckAllButton.IsEnabled = false;
         SortButton.IsEnabled = false;
         OpenCsvButton.IsEnabled = false;
+        CancelCheckButton.IsEnabled = true;
+        CancelCheckButton.Visibility = Visibility.Visible;
+        CheckProgressBar.Visibility = Visibility.Visible;
+        CheckProgressBar.Value = 0;
+        CheckProgressText.Text = "Preparing check...";
         var checkAllContent = CheckAllButton.Content;
         var checkStatusText = new TextBlock
         {
@@ -1514,12 +1555,14 @@ Jancy setup:
                 : null;
             using var semaphore = new SemaphoreSlim(12);
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+            _checkAllCancellation = timeout;
 
             var tasks = snapshot.Select(async proxy =>
             {
                 await semaphore.WaitAsync(timeout.Token);
                 try
                 {
+                    timeout.Token.ThrowIfCancellationRequested();
                     await RunOnUiAsync(() => proxy.Status = "Checking");
                     var result = await _proxySpeedChecker.CheckAsync(proxy, targetUri, timeout.Token);
                     await RunOnUiAsync(() =>
@@ -1529,9 +1572,16 @@ Jancy setup:
                         proxy.SpeedGroup = result.SpeedGroup;
                         proxy.Status = result.Status;
                         completed++;
-                        checkStatusText.Text = $"Checked {completed}/{snapshot.Count}";
-                        LogTitleText.Text = "Check";
-                        LogText.Text = $"Checked {completed}/{snapshot.Count}";
+                        UpdateCheckProgress(completed, snapshot.Count, checkStatusText);
+                    });
+                }
+                catch (OperationCanceledException)
+                {
+                    await RunOnUiAsync(() =>
+                    {
+                        proxy.Status = proxy.Status == "Checking" ? "Cancelled" : proxy.Status;
+                        completed++;
+                        UpdateCheckProgress(completed, snapshot.Count, checkStatusText);
                     });
                 }
                 catch
@@ -1541,15 +1591,17 @@ Jancy setup:
                         proxy.SpeedGroup = "Dead";
                         proxy.Status = "Dead";
                         completed++;
-                        checkStatusText.Text = $"Checked {completed}/{snapshot.Count}";
-                        LogTitleText.Text = "Check";
-                        LogText.Text = $"Checked {completed}/{snapshot.Count}";
+                        UpdateCheckProgress(completed, snapshot.Count, checkStatusText);
                     });
                 }
                 try
                 {
+                    timeout.Token.ThrowIfCancellationRequested();
                     var geo = await _proxyGeoService.GetAsync(proxy, cancellationToken: timeout.Token);
                     await RunOnUiAsync(() => ApplyProxyGeo(proxy, geo));
+                }
+                catch (OperationCanceledException)
+                {
                 }
                 catch
                 {
@@ -1562,10 +1614,22 @@ Jancy setup:
             });
 
             await Task.WhenAll(tasks);
-            SortProxiesBySpeed();
+            if (!timeout.IsCancellationRequested)
+            {
+                SortProxiesBySpeed();
+            }
             SaveState();
             UpdateSummary();
-            ShowMessage("Proxy check finished and grouped by speed.", InfoBarSeverity.Success);
+            ShowMessage(timeout.IsCancellationRequested
+                ? $"Proxy check cancelled. Checked {completed}/{snapshot.Count}."
+                : "Proxy check finished and grouped by speed.",
+                timeout.IsCancellationRequested ? InfoBarSeverity.Warning : InfoBarSeverity.Success);
+        }
+        catch (OperationCanceledException)
+        {
+            SaveState();
+            UpdateSummary();
+            ShowMessage("Proxy check cancelled.", InfoBarSeverity.Warning);
         }
         catch (Exception ex)
         {
@@ -1573,11 +1637,37 @@ Jancy setup:
         }
         finally
         {
+            _checkAllCancellation = null;
             CheckAllButton.Content = checkAllContent;
             CheckAllButton.IsEnabled = true;
             SortButton.IsEnabled = true;
             OpenCsvButton.IsEnabled = true;
+            CancelCheckButton.Visibility = Visibility.Collapsed;
+            CancelCheckButton.IsEnabled = true;
+            CheckProgressBar.Visibility = Visibility.Collapsed;
+            CheckProgressText.Text = "";
         }
+    }
+
+    private void CancelCheck_Click(object sender, RoutedEventArgs e)
+    {
+        _checkAllCancellation?.Cancel();
+        CancelCheckButton.IsEnabled = false;
+        CheckProgressText.Text = "Cancelling...";
+    }
+
+    private void UpdateCheckProgress(int completed, int total, TextBlock? checkStatusText = null)
+    {
+        var text = $"Checked {completed}/{total}";
+        if (checkStatusText is not null)
+        {
+            checkStatusText.Text = text;
+        }
+
+        CheckProgressText.Text = text;
+        CheckProgressBar.Value = total <= 0 ? 0 : Math.Clamp(completed * 100.0 / total, 0, 100);
+        LogTitleText.Text = "Check";
+        LogText.Text = text;
     }
 
     private void SortBySpeed_Click(object sender, RoutedEventArgs e)
@@ -1934,13 +2024,17 @@ Jancy setup:
 
     private List<double> NormalizeProxyColumnWidths(IReadOnlyList<double>? savedWidths)
     {
+        if (savedWidths is null || savedWidths.Count != _defaultProxyColumnWidths.Length)
+        {
+            return _defaultProxyColumnWidths
+                .Select((width, index) => NormalizeProxyColumnWidth(index, width))
+                .ToList();
+        }
+
         var widths = new List<double>(_defaultProxyColumnWidths.Length);
         for (var index = 0; index < _defaultProxyColumnWidths.Length; index++)
         {
-            var width = savedWidths is not null && index < savedWidths.Count
-                ? savedWidths[index]
-                : _defaultProxyColumnWidths[index];
-            widths.Add(NormalizeProxyColumnWidth(index, width));
+            widths.Add(NormalizeProxyColumnWidth(index, savedWidths[index]));
         }
 
         return widths;
@@ -2366,6 +2460,7 @@ Jancy setup:
 
     private void ShowSelectionSummary()
     {
+        UpdateSelectionSummaryText();
         var selected = GetSelectedProxies();
         var syncSelected = GetAllLoadedProxies().Where(proxy => proxy.SyncSelected).ToList();
         var rows = syncSelected.Count > 0
@@ -2381,6 +2476,19 @@ Jancy setup:
         var suffix = string.IsNullOrWhiteSpace(rows) ? "" : $". Rows: {rows}";
         var eventSentrySelected = GetAllLoadedProxies().Count(proxy => proxy.UseForEventSentry);
         ShowMessage($"Selected proxies: {selected.Count}. Sync selected: {syncSelected.Count}. Event Sentry: {eventSentrySelected}{suffix}", InfoBarSeverity.Informational);
+    }
+
+    private void UpdateSelectionSummaryText()
+    {
+        if (SelectedSummaryText is null)
+        {
+            return;
+        }
+
+        var selected = GetSelectedProxies().Count;
+        var syncSelected = GetAllLoadedProxies().Count(proxy => proxy.SyncSelected);
+        var displayCount = syncSelected > 0 ? syncSelected : selected;
+        SelectedSummaryText.Text = $"Selected: {displayCount}";
     }
 
     private void ClearClosedProxySelection(ProxyEntry proxy)
@@ -2506,6 +2614,7 @@ Jancy setup:
     private void UpdateSummary(string? fileName = null)
     {
         UpdateEventSentryBridgeIndicator();
+        UpdateSelectionSummaryText();
     }
 
     private void UpdateEventSentryBridgeIndicator()
@@ -2731,7 +2840,7 @@ Jancy setup:
         {
             Header = "Install from store URL",
             PlaceholderText = "Chrome Web Store, Edge Add-ons, or Firefox Add-ons URL",
-            Width = 680
+            Width = 760
         };
         var installStoreButton = new Button { Content = "Install URL" };
         var addFolderButton = new Button { Content = "Add unpacked folder" };
@@ -2878,7 +2987,7 @@ Jancy setup:
         var panel = new StackPanel
         {
             Spacing = 10,
-            Width = 680
+            Width = 760
         };
         panel.Children.Add(hint);
         panel.Children.Add(storeUrlBox);
@@ -2890,8 +2999,8 @@ Jancy setup:
         var scrollViewer = new ScrollViewer
         {
             Content = panel,
-            Width = 720,
-            MaxHeight = 560,
+            Width = 800,
+            MaxHeight = 620,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
@@ -2965,15 +3074,20 @@ Jancy setup:
         Action<BrowserExtensionEntry, bool> setSelected,
         Action refreshSections)
     {
-        var row = new StackPanel
+        var row = new Grid
         {
-            Spacing = 6,
-            Padding = new Thickness(8, 6, 8, 6)
+            Padding = new Thickness(10, 8, 10, 8),
+            ColumnSpacing = 12,
+            MinHeight = 48,
+            Background = new SolidColorBrush(Color.FromArgb(28, 255, 255, 255))
         };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) });
 
         var runBox = new CheckBox
         {
-            Content = $"Run with {browserName}",
+            Content = "Run",
             IsChecked = isSelected(extension),
             IsEnabled = canUse(extension),
             VerticalAlignment = VerticalAlignment.Center
@@ -3006,13 +3120,15 @@ Jancy setup:
         {
             Text = extension.Name,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            TextTrimming = TextTrimming.CharacterEllipsis
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxLines = 1
         });
         details.Children.Add(new TextBlock
         {
-            Text = $"{extension.SourceKind} | {extension.SupportText}",
+            Text = $"{browserName} | {extension.SourceKind} | {extension.SupportText}",
             FontSize = 12,
             TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxLines = 1,
             Opacity = 0.72
         });
 
@@ -3020,7 +3136,8 @@ Jancy setup:
         {
             Content = "Remove",
             MinWidth = 86,
-            HorizontalAlignment = HorizontalAlignment.Left
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center
         };
         removeButton.Click += (_, _) =>
         {
@@ -3039,17 +3156,18 @@ Jancy setup:
             }
         };
 
-        var actions = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 10
-        };
-        actions.Children.Add(runBox);
-        actions.Children.Add(removeButton);
-
+        Grid.SetColumn(runBox, 0);
+        Grid.SetColumn(details, 1);
+        Grid.SetColumn(removeButton, 2);
+        row.Children.Add(runBox);
         row.Children.Add(details);
-        row.Children.Add(actions);
-        return row;
+        row.Children.Add(removeButton);
+
+        return new Border
+        {
+            Child = row,
+            CornerRadius = new CornerRadius(4)
+        };
     }
 
     private static Border CreateExtensionSectionBorder(UIElement content)
@@ -3301,7 +3419,7 @@ Jancy setup:
             Header = "Jancy Web Interface",
             Text = _jancyEndpointUrl,
             PlaceholderText = "http://127.0.0.1:43033",
-            Width = 430
+            Width = 520
         };
         var installBridgeButton = new Button { Content = "Install Jancy bridge" };
         var defaultBrowserBox = new ComboBox
@@ -3369,7 +3487,7 @@ Jancy setup:
         var panel = new StackPanel
         {
             Spacing = 10,
-            Width = 430
+            Width = 520
         };
         panel.Children.Add(endpointBox);
         panel.Children.Add(installBridgeButton);
@@ -3379,8 +3497,8 @@ Jancy setup:
         var scrollViewer = new ScrollViewer
         {
             Content = panel,
-            Width = 450,
-            MaxHeight = 470,
+            Width = 560,
+            MaxHeight = 560,
             Padding = new Thickness(0, 0, 8, 0),
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto

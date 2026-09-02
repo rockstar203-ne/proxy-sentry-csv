@@ -24,45 +24,75 @@
 
             <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                 <StackPanel Orientation="Horizontal" Spacing="8">
-                    <Button x:Name="OpenCsvButton" Click="OpenCsv_Click" Content="Open list" />
-                    <Button x:Name="ExportButton" Content="Export">
-                        <Button.Flyout>
-                            <MenuFlyout>
-                                <MenuFlyoutItem Click="ExportAds_Click" Text="Export ADS" />
-                                <MenuFlyoutItem Click="ExportTxt_Click" Text="Export TXT" />
-                            </MenuFlyout>
-                        </Button.Flyout>
-                    </Button>
-                    <Button x:Name="CheckAllButton" Click="CheckAll_Click" Content="Check all" />
-                    <Button x:Name="SortButton" Content="Sort">
-                        <Button.Flyout>
-                            <MenuFlyout>
-                                <MenuFlyoutItem Click="SortBySpeed_Click" Text="By speed" />
-                                <MenuFlyoutItem Click="SortByDocumentOrder_Click" Text="Document order" />
-                            </MenuFlyout>
-                        </Button.Flyout>
-                    </Button>
-                    <Button x:Name="ClearUsedButton" Click="ClearUsed_Click" Content="Clear used" />
-                    <Button x:Name="CacheButton" Click="Cache_Click" Content="Cache: ..." />
-                    <Button x:Name="CloseAllButton" Click="CloseAll_Click" Content="Close All" />
-                    <Button x:Name="ExtensionsButton" Click="Extensions_Click" Content="Extensions" />
-                    <Button x:Name="SettingsButton" Click="Settings_Click" Content="Settings" />
-                    <Button x:Name="CheckUpdatesButton" Click="CheckUpdates_Click" Content="Check updates" />
-                    <Button x:Name="AboutButton" Click="About_Click" Content="About" />
-                    <ComboBox
-                        x:Name="BulkBrowserBox"
-                        MinWidth="118"
-                        VerticalAlignment="Center"
-                        SelectedValuePath="Tag">
-                        <ComboBoxItem Content="Chrome" IsSelected="True" Tag="chrome" />
-                        <ComboBoxItem Content="Edge" Tag="edge" />
-                        <ComboBoxItem Content="Firefox" Tag="firefox" />
-                        <ComboBoxItem Content="Jancy" Tag="jancy" />
-                    </ComboBox>
-                    <Button
-                        x:Name="BulkBrowserApplyButton"
-                        Click="BulkBrowserApply_Click"
-                        Content="Set browser" />
+                    <Border Padding="10,8" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock VerticalAlignment="Center" FontWeight="SemiBold" Text="Lists" />
+                            <Button x:Name="OpenCsvButton" Click="OpenCsv_Click" Content="Open list" />
+                            <Button x:Name="ExportButton" Content="Export">
+                                <Button.Flyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem Click="ExportAds_Click" Text="Export ADS" />
+                                        <MenuFlyoutItem Click="ExportTxt_Click" Text="Export TXT" />
+                                    </MenuFlyout>
+                                </Button.Flyout>
+                            </Button>
+                        </StackPanel>
+                    </Border>
+                    <Border Padding="10,8" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock VerticalAlignment="Center" FontWeight="SemiBold" Text="Check" />
+                            <Button x:Name="CheckAllButton" Click="CheckAll_Click" Content="Check all" />
+                            <Button x:Name="SortButton" Content="Sort">
+                                <Button.Flyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem Click="SortBySpeed_Click" Text="By speed" />
+                                        <MenuFlyoutItem Click="SortByDocumentOrder_Click" Text="Document order" />
+                                    </MenuFlyout>
+                                </Button.Flyout>
+                            </Button>
+                            <Button x:Name="ClearUsedButton" Click="ClearUsed_Click" Content="Clear used" />
+                        </StackPanel>
+                    </Border>
+                    <Border Padding="10,8" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock
+                                x:Name="SelectedSummaryText"
+                                MinWidth="92"
+                                VerticalAlignment="Center"
+                                FontWeight="SemiBold"
+                                Text="Selected: 0" />
+                            <ComboBox
+                                x:Name="BulkBrowserBox"
+                                MinWidth="118"
+                                VerticalAlignment="Center"
+                                SelectedValuePath="Tag">
+                                <ComboBoxItem Content="Chrome" IsSelected="True" Tag="chrome" />
+                                <ComboBoxItem Content="Edge" Tag="edge" />
+                                <ComboBoxItem Content="Firefox" Tag="firefox" />
+                                <ComboBoxItem Content="Jancy" Tag="jancy" />
+                            </ComboBox>
+                            <Button
+                                x:Name="BulkBrowserApplyButton"
+                                Click="BulkBrowserApply_Click"
+                                Content="Set browser" />
+                        </StackPanel>
+                    </Border>
+                    <Border Padding="10,8" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock VerticalAlignment="Center" FontWeight="SemiBold" Text="Tools" />
+                            <Button x:Name="CacheButton" Click="Cache_Click" Content="Cache: ..." />
+                            <Button x:Name="CloseAllButton" Click="CloseAll_Click" Content="Close All" />
+                            <Button x:Name="ExtensionsButton" Click="Extensions_Click" Content="Extensions" />
+                            <Button x:Name="SettingsButton" Click="Settings_Click" Content="Settings" />
+                            <Button x:Name="CheckUpdatesButton" Click="CheckUpdates_Click" Content="Check updates" />
+                        </StackPanel>
+                    </Border>
+                    <Border Padding="10,8" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock VerticalAlignment="Center" FontWeight="SemiBold" Text="Help" />
+                            <Button x:Name="AboutButton" Click="About_Click" Content="About" />
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
             </ScrollViewer>
 
@@ -78,7 +108,6 @@
                     <Button x:Name="OpenSyncGroupButton" Click="OpenSyncGroup_Click" Content="Open sync group" />
                     <Button x:Name="StartSyncButton" Click="StartSync_Click" Content="Start sync" />
                     <Button x:Name="StopSyncButton" Click="StopSync_Click" Content="Stop sync" />
-                    <Button x:Name="ApplyTargetUrlButton" Click="ApplyTargetUrl_Click" Content="Apply target URL" />
                     <Button x:Name="AlignSelectedButton" Click="AlignSelected_Click" Content="Align selected" />
                     <TextBlock
                         VerticalAlignment="Center"
@@ -122,9 +151,17 @@
                 <ColumnDefinition Width="320" />
             </Grid.ColumnDefinitions>
 
+            <Border
+                x:Name="TargetUrlContainerBorder"
+                Padding="12"
+                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="6">
             <Grid ColumnSpacing="8" RowSpacing="6">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>
@@ -148,12 +185,30 @@
                     <ComboBoxItem Content="URL list" Tag="list" />
                 </ComboBox>
 
+                <Button
+                    x:Name="ApplyTargetUrlButton"
+                    Grid.Column="2"
+                    Margin="0,27,0,0"
+                    VerticalAlignment="Top"
+                    Click="ApplyTargetUrl_Click"
+                    Content="Apply target URL" />
+
+                <Button
+                    x:Name="PasteTargetUrlButton"
+                    Grid.Column="3"
+                    Margin="0,27,0,0"
+                    VerticalAlignment="Top"
+                    Click="PasteTargetUrl_Click"
+                    Content="Paste"
+                    ToolTipService.ToolTip="Replace Target URL with clipboard text" />
+
                 <StackPanel
                     x:Name="TargetUrlListControlsPanel"
                     Grid.Row="1"
-                    Grid.ColumnSpan="2"
+                    Grid.ColumnSpan="4"
                     Orientation="Horizontal"
-                    Spacing="8">
+                    Spacing="8"
+                    Visibility="Collapsed">
                     <ComboBox
                         x:Name="TargetUrlListBox"
                         Header="URL list"
@@ -202,15 +257,17 @@
                         Content="URL lists" />
                 </StackPanel>
             </Grid>
+            </Border>
 
-            <TextBox
-                Grid.Column="1"
-                x:Name="SearchBox"
-                MinWidth="320"
-                VerticalAlignment="Top"
-                Header="Search"
-                PlaceholderText="Name or IP"
-                TextChanged="SearchBox_TextChanged" />
+            <StackPanel Grid.Column="1" Spacing="8">
+                <TextBox
+                    x:Name="SearchBox"
+                    MinWidth="320"
+                    VerticalAlignment="Top"
+                    Header="Search"
+                    PlaceholderText="Name or IP"
+                    TextChanged="SearchBox_TextChanged" />
+            </StackPanel>
         </Grid>
 
         <Grid Grid.Row="2" ColumnSpacing="12">
@@ -298,8 +355,7 @@
                                 <ColumnDefinition Width="92" />
                                 <ColumnDefinition Width="170" />
                                 <ColumnDefinition Width="190" />
-                                <ColumnDefinition Width="78" />
-                                <ColumnDefinition Width="78" />
+                                <ColumnDefinition Width="135" />
                                 <ColumnDefinition Width="72" />
                                 <ColumnDefinition Width="130" />
                                 <ColumnDefinition Width="88" />
@@ -396,7 +452,7 @@
                                 PointerMoved="ProxyColumnHeader_PointerMoved"
                                 PointerPressed="ProxyColumnHeader_PointerPressed"
                                 PointerReleased="ProxyColumnHeader_PointerReleased">
-                                <TextBlock FontWeight="SemiBold" Text="Ping" />
+                                <TextBlock FontWeight="SemiBold" Text="Speed" />
                                 <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
                                     <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </Grid>
@@ -408,7 +464,7 @@
                                 PointerMoved="ProxyColumnHeader_PointerMoved"
                                 PointerPressed="ProxyColumnHeader_PointerPressed"
                                 PointerReleased="ProxyColumnHeader_PointerReleased">
-                                <TextBlock FontWeight="SemiBold" Text="Resp" />
+                                <TextBlock FontWeight="SemiBold" Text="Used" />
                                 <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
                                     <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </Grid>
@@ -420,7 +476,7 @@
                                 PointerMoved="ProxyColumnHeader_PointerMoved"
                                 PointerPressed="ProxyColumnHeader_PointerPressed"
                                 PointerReleased="ProxyColumnHeader_PointerReleased">
-                                <TextBlock FontWeight="SemiBold" Text="Used" />
+                                <TextBlock FontWeight="SemiBold" Text="Status" />
                                 <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
                                     <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </Grid>
@@ -432,7 +488,7 @@
                                 PointerMoved="ProxyColumnHeader_PointerMoved"
                                 PointerPressed="ProxyColumnHeader_PointerPressed"
                                 PointerReleased="ProxyColumnHeader_PointerReleased">
-                                <TextBlock FontWeight="SemiBold" Text="Status" />
+                                <TextBlock FontWeight="SemiBold" Text="Favorite" />
                                 <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
                                     <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </Grid>
@@ -440,18 +496,6 @@
                             <Grid
                                 Grid.Column="11"
                                 Tag="11"
-                                PointerCanceled="ProxyColumnHeader_PointerCanceled"
-                                PointerMoved="ProxyColumnHeader_PointerMoved"
-                                PointerPressed="ProxyColumnHeader_PointerPressed"
-                                PointerReleased="ProxyColumnHeader_PointerReleased">
-                                <TextBlock FontWeight="SemiBold" Text="Favorite" />
-                                <Grid Width="14" HorizontalAlignment="Right" Background="Transparent" ToolTipService.ToolTip="Drag to resize column">
-                                    <Border Width="1" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center" Background="{ThemeResource TextFillColorSecondaryBrush}" />
-                                </Grid>
-                            </Grid>
-                            <Grid
-                                Grid.Column="12"
-                                Tag="12"
                                 PointerCanceled="ProxyColumnHeader_PointerCanceled"
                                 PointerMoved="ProxyColumnHeader_PointerMoved"
                                 PointerPressed="ProxyColumnHeader_PointerPressed"
@@ -480,8 +524,7 @@
                                     <ColumnDefinition Width="92" />
                                     <ColumnDefinition Width="170" />
                                     <ColumnDefinition Width="190" />
-                                    <ColumnDefinition Width="78" />
-                                    <ColumnDefinition Width="78" />
+                                    <ColumnDefinition Width="135" />
                                     <ColumnDefinition Width="72" />
                                     <ColumnDefinition Width="130" />
                                     <ColumnDefinition Width="88" />
@@ -557,10 +600,9 @@
                                     VerticalAlignment="Center"
                                     Text="{Binding RegionText}"
                                     TextTrimming="CharacterEllipsis" />
-                                <TextBlock Grid.Column="7" VerticalAlignment="Center" Text="{Binding PingText}" />
-                                <TextBlock Grid.Column="8" VerticalAlignment="Center" Text="{Binding ResponseText}" />
+                                <TextBlock Grid.Column="7" VerticalAlignment="Center" Text="{Binding SpeedText}" />
                                 <Border
-                                    Grid.Column="9"
+                                    Grid.Column="8"
                                     Width="62"
                                     Padding="8,3"
                                     HorizontalAlignment="Left"
@@ -572,19 +614,19 @@
                                         Text="{Binding UsedText}" />
                                 </Border>
                                 <TextBlock
-                                    Grid.Column="10"
+                                    Grid.Column="9"
                                     VerticalAlignment="Center"
                                     Text="{Binding Status}"
                                     TextTrimming="CharacterEllipsis" />
                                 <Button
-                                    Grid.Column="11"
+                                    Grid.Column="10"
                                     MinWidth="76"
                                     Background="{Binding FavoriteButtonBrush}"
                                     Click="FavoriteProxy_Click"
                                     Content="{Binding FavoriteButtonText}"
                                     Foreground="White" />
                                 <StackPanel
-                                    Grid.Column="12"
+                                    Grid.Column="11"
                                     Orientation="Horizontal"
                                     Spacing="6">
                                     <Button
@@ -618,11 +660,17 @@
             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
             BorderThickness="1"
             CornerRadius="4">
-            <Grid ColumnSpacing="12">
+            <Grid ColumnSpacing="12" RowSpacing="8">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="90" />
                     <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="220" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
                 <TextBlock
                     x:Name="LogTitleText"
                     FontWeight="SemiBold"
@@ -633,6 +681,26 @@
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     Text="Ready"
                     TextWrapping="Wrap" />
+                <TextBlock
+                    Grid.Column="2"
+                    x:Name="CheckProgressText"
+                    HorizontalAlignment="Right"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="" />
+                <Button
+                    Grid.Column="3"
+                    x:Name="CancelCheckButton"
+                    MinWidth="80"
+                    Click="CancelCheck_Click"
+                    Content="Cancel"
+                    Visibility="Collapsed" />
+                <ProgressBar
+                    Grid.Row="1"
+                    Grid.ColumnSpan="4"
+                    x:Name="CheckProgressBar"
+                    Maximum="100"
+                    Value="0"
+                    Visibility="Collapsed" />
             </Grid>
         </Border>
     </Grid>

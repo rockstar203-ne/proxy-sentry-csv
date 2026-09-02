@@ -424,6 +424,7 @@ public sealed class ProxyEntry : INotifyPropertyChanged
             _pingMs = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(PingText));
+            OnPropertyChanged(nameof(SpeedText));
         }
     }
 
@@ -440,6 +441,7 @@ public sealed class ProxyEntry : INotifyPropertyChanged
             _responseMs = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(ResponseText));
+            OnPropertyChanged(nameof(SpeedText));
         }
     }
 
@@ -457,6 +459,7 @@ public sealed class ProxyEntry : INotifyPropertyChanged
             OnPropertyChanged();
             OnPropertyChanged(nameof(SpeedBadgeBrush));
             OnPropertyChanged(nameof(SpeedRank));
+            OnPropertyChanged(nameof(SpeedText));
         }
     }
 
@@ -465,6 +468,10 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     public string PingText => PingMs.HasValue ? $"{PingMs.Value} ms" : "-";
 
     public string ResponseText => ResponseMs.HasValue ? $"{ResponseMs.Value} ms" : "-";
+
+    public string SpeedText => PingMs.HasValue || ResponseMs.HasValue
+        ? $"P {PingText} / R {ResponseText}"
+        : "-";
 
     public int SpeedRank => SpeedGroup switch
     {
@@ -476,9 +483,9 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     };
 
     public SolidColorBrush RowBackground => SyncSelected
-        ? new SolidColorBrush(ColorHelper.FromArgb(92, 13, 110, 253))
+        ? new SolidColorBrush(ColorHelper.FromArgb(132, 13, 110, 253))
         : Used
-            ? new SolidColorBrush(ColorHelper.FromArgb(38, 40, 167, 69))
+            ? new SolidColorBrush(ColorHelper.FromArgb(44, 40, 167, 69))
             : new SolidColorBrush(Colors.Transparent);
 
     public SolidColorBrush UsedBadgeBrush => Used
