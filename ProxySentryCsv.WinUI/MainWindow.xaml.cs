@@ -25,6 +25,7 @@ public sealed partial class MainWindow : Window
     private readonly ProxyGeoService _proxyGeoService;
     private readonly BrowserCacheService _browserCache;
     private readonly BrowserExtensionStore _extensionStore;
+    private readonly TargetUrlListStore _targetUrlListStore;
     private readonly ProxySpeedChecker _proxySpeedChecker = new();
     private readonly EventSentryBridgeServer _eventSentryBridge;
     private AppWindow? _appWindow;
@@ -37,6 +38,9 @@ public sealed partial class MainWindow : Window
     private string _lastUpdatePreviousHead = "";
     private bool _suppressStateSave;
     private bool _syncingSelectionState;
+    private bool _syncingTargetUrlSelection;
+    private bool _useTargetUrlList;
+    private bool _disableTargetUrlAutoAdvance;
     private List<string> _lastJancySyncStableIds = [];
     private List<string> _lastChromeSyncStableIds = [];
     private int _syncClickDelayMs;
@@ -55,6 +59,8 @@ public sealed partial class MainWindow : Window
 
     public ObservableCollection<ProxyEntry> Proxies { get; } = [];
     public ObservableCollection<ProxyListEntry> ProxyLists { get; } = [];
+    public ObservableCollection<TargetUrlListEntry> TargetUrlLists { get; } = [];
+    public ObservableCollection<TargetUrlItemEntry> ActiveTargetUrls { get; } = [];
     public ObservableCollection<SyncMonitorOption> SyncMonitors { get; } = [];
     public ObservableCollection<BrowserExtensionEntry> GlobalExtensions { get; } = [];
 
@@ -66,6 +72,7 @@ public sealed partial class MainWindow : Window
         _proxyGeoService = new ProxyGeoService(_appDataPath);
         _browserCache = new BrowserCacheService(_appDataPath);
         _extensionStore = new BrowserExtensionStore(_appDataPath);
+        _targetUrlListStore = new TargetUrlListStore(_appDataPath);
         _systemBrowserLauncher = new SystemBrowserLauncher(_appDataPath, _browserForgeFingerprints);
         _jancyLauncher = new JancyLauncher(_appDataPath);
         _systemBrowserLauncher.ProfilesClosed += SystemBrowserLauncher_ProfilesClosed;
@@ -115,7 +122,6 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var targetUrl = TargetUrlBox.Text.Trim();
         if (proxy.IsOpen)
         {
             try
@@ -133,9 +139,9 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(targetUrl))
+        var targetUrl = ResolveTargetUrlForBrowserAction();
+        if (targetUrl is null)
         {
-            ShowMessage("Target URL is empty.", InfoBarSeverity.Warning);
             return;
         }
 
@@ -275,10 +281,9 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var targetUrl = TargetUrlBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(targetUrl))
+        var targetUrl = ResolveTargetUrlForBrowserAction();
+        if (targetUrl is null)
         {
-            ShowMessage("Target URL is empty.", InfoBarSeverity.Warning);
             return;
         }
 
@@ -458,16 +463,9 @@ public sealed partial class MainWindow : Window
 
     private async void ApplyTargetUrl_Click(object sender, RoutedEventArgs e)
     {
-        var targetUrl = TargetUrlBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(targetUrl))
+        var targetUrl = ResolveTargetUrlForBrowserAction();
+        if (targetUrl is null)
         {
-            ShowMessage("Target URL is empty.", InfoBarSeverity.Warning);
-            return;
-        }
-
-        if (!Uri.TryCreate(targetUrl, UriKind.Absolute, out _))
-        {
-            ShowMessage("Target URL must be an absolute URL.", InfoBarSeverity.Warning);
             return;
         }
 
@@ -492,6 +490,7 @@ public sealed partial class MainWindow : Window
             }
 
             _lastChromeSyncStableIds = chromeSelected.Select(proxy => proxy.StableId).ToList();
+            AdvanceTargetUrlListAfterSuccessfulApply();
             SaveState();
             ShowMessage($"Applied Target URL to {affectedCount} Chrome window(s).", InfoBarSeverity.Success);
         }
@@ -503,6 +502,411 @@ public sealed partial class MainWindow : Window
         {
             ApplyTargetUrlButton.IsEnabled = true;
         }
+    }
+
+    private string? ResolveTargetUrlForBrowserAction(bool showMessages = true)
+    {
+        string rawUrl;
+        if (!_useTargetUrlList)
+        {
+            rawUrl = TargetUrlBox.Text.Trim();
+        }
+        else
+        {
+            var list = GetActiveTargetUrlList();
+            if (list is null)
+            {
+                if (showMessages)
+                {
+                    ShowMessage("Select a Target URL list first.", InfoBarSeverity.Warning);
+                }
+
+                return null;
+            }
+
+            if (list.IsExhausted)
+            {
+                if (showMessages)
+                {
+                    ShowMessage($"Target URL list {list.Name} is finished.", InfoBarSeverity.Warning);
+                }
+
+                return null;
+            }
+
+            rawUrl = list.CurrentUrl;
+        }
+
+        if (string.IsNullOrWhiteSpace(rawUrl))
+        {
+            if (showMessages)
+            {
+                ShowMessage("Target URL is empty.", InfoBarSeverity.Warning);
+            }
+
+            return null;
+        }
+
+        if (!TargetUrlNormalizer.TryNormalize(rawUrl, out var targetUrl))
+        {
+            if (showMessages)
+            {
+                ShowMessage("Target URL must be a valid URL, for example https://tickets.bso.org.", InfoBarSeverity.Warning);
+            }
+
+            return null;
+        }
+
+        if (!string.Equals(TargetUrlBox.Text.Trim(), targetUrl, StringComparison.Ordinal))
+        {
+            TargetUrlBox.Text = targetUrl;
+        }
+
+        UpdateTargetUrlControls();
+        return targetUrl;
+    }
+
+    private void AdvanceTargetUrlListAfterSuccessfulApply()
+    {
+        if (!_useTargetUrlList || _disableTargetUrlAutoAdvance)
+        {
+            return;
+        }
+
+        var list = GetActiveTargetUrlList();
+        if (list is null)
+        {
+            return;
+        }
+
+        list.MoveNext();
+        RefreshActiveTargetUrlItems();
+        SyncTargetUrlBoxFromActiveList();
+        UpdateTargetUrlControls();
+    }
+
+    private TargetUrlListEntry? GetActiveTargetUrlList()
+    {
+        return TargetUrlListBox.SelectedItem as TargetUrlListEntry
+            ?? TargetUrlLists.FirstOrDefault();
+    }
+
+    private void TargetUrlModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _useTargetUrlList = string.Equals((TargetUrlModeBox.SelectedValue as string) ?? "", "list", StringComparison.OrdinalIgnoreCase);
+        if (_useTargetUrlList && TargetUrlListBox.SelectedItem is null && TargetUrlLists.Count > 0)
+        {
+            TargetUrlListBox.SelectedItem = TargetUrlLists[0];
+        }
+
+        RefreshActiveTargetUrlItems();
+        SyncTargetUrlBoxFromActiveList();
+        UpdateTargetUrlControls();
+        if (!_suppressStateSave)
+        {
+            SaveState();
+        }
+    }
+
+    private void TargetUrlListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        RefreshActiveTargetUrlItems();
+        SyncTargetUrlBoxFromActiveList();
+        UpdateTargetUrlControls();
+        if (!_suppressStateSave)
+        {
+            SaveState();
+        }
+    }
+
+    private void TargetUrlPrev_Click(object sender, RoutedEventArgs e)
+    {
+        var list = GetActiveTargetUrlList();
+        if (list is null)
+        {
+            return;
+        }
+
+        list.MovePrevious();
+        RefreshActiveTargetUrlItems();
+        SyncTargetUrlBoxFromActiveList();
+        UpdateTargetUrlControls();
+        SaveState();
+    }
+
+    private void TargetUrlNext_Click(object sender, RoutedEventArgs e)
+    {
+        var list = GetActiveTargetUrlList();
+        if (list is null)
+        {
+            return;
+        }
+
+        list.MoveNext();
+        RefreshActiveTargetUrlItems();
+        SyncTargetUrlBoxFromActiveList();
+        UpdateTargetUrlControls();
+        SaveState();
+    }
+
+    private void TargetUrlItemBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_syncingTargetUrlSelection || !_useTargetUrlList)
+        {
+            return;
+        }
+
+        var list = GetActiveTargetUrlList();
+        if (list is null || TargetUrlItemBox.SelectedItem is not TargetUrlItemEntry item)
+        {
+            return;
+        }
+
+        list.CurrentIndex = item.Index;
+        TargetUrlBox.Text = item.Url;
+        UpdateTargetUrlControls();
+        if (!_suppressStateSave)
+        {
+            SaveState();
+        }
+    }
+
+    private void TargetUrlNoAutoNextBox_Changed(object sender, RoutedEventArgs e)
+    {
+        _disableTargetUrlAutoAdvance = TargetUrlNoAutoNextBox.IsChecked == true;
+        if (!_suppressStateSave)
+        {
+            SaveState();
+        }
+    }
+
+    private async void TargetUrlLists_Click(object sender, RoutedEventArgs e)
+    {
+        await ShowTargetUrlListsDialogAsync();
+    }
+
+    private void SyncTargetUrlBoxFromActiveList()
+    {
+        if (!_useTargetUrlList)
+        {
+            return;
+        }
+
+        var list = GetActiveTargetUrlList();
+        if (list is null || list.IsExhausted)
+        {
+            return;
+        }
+
+        TargetUrlBox.Text = list.CurrentUrl;
+    }
+
+    private void RefreshActiveTargetUrlItems()
+    {
+        if (TargetUrlItemBox is null)
+        {
+            return;
+        }
+
+        _syncingTargetUrlSelection = true;
+        try
+        {
+            ActiveTargetUrls.Clear();
+            var list = GetActiveTargetUrlList();
+            if (list is null)
+            {
+                TargetUrlItemBox.SelectedIndex = -1;
+                return;
+            }
+
+            for (var index = 0; index < list.Urls.Count; index++)
+            {
+                ActiveTargetUrls.Add(new TargetUrlItemEntry(index, list.Urls[index]));
+            }
+
+            TargetUrlItemBox.SelectedIndex = list.IsExhausted
+                ? -1
+                : Math.Clamp(list.CurrentIndex, 0, Math.Max(0, list.Count - 1));
+        }
+        finally
+        {
+            _syncingTargetUrlSelection = false;
+        }
+    }
+
+    private void UpdateTargetUrlControls()
+    {
+        if (TargetUrlListBox is null || TargetUrlItemBox is null)
+        {
+            return;
+        }
+
+        var listMode = _useTargetUrlList;
+        var listVisibility = listMode ? Visibility.Visible : Visibility.Collapsed;
+        TargetUrlBox.IsReadOnly = listMode;
+        TargetUrlListControlsPanel.Visibility = listVisibility;
+        TargetUrlListBox.Visibility = listVisibility;
+        TargetUrlItemBox.Visibility = listVisibility;
+        TargetUrlListProgressText.Visibility = listVisibility;
+        TargetUrlPrevButton.Visibility = listVisibility;
+        TargetUrlNextButton.Visibility = listVisibility;
+        TargetUrlListsButton.Visibility = listVisibility;
+        TargetUrlNoAutoNextBox.Visibility = listVisibility;
+
+        var list = GetActiveTargetUrlList();
+        TargetUrlListProgressText.Text = list is null ? "No list" : list.ProgressText;
+        TargetUrlPrevButton.IsEnabled = list is not null && list.CurrentIndex > 0;
+        TargetUrlNextButton.IsEnabled = list is not null && list.CurrentIndex < list.Count - 1;
+    }
+
+    private void SelectTargetUrlMode(bool useList)
+    {
+        _useTargetUrlList = useList;
+        foreach (var item in TargetUrlModeBox.Items.OfType<ComboBoxItem>())
+        {
+            if (string.Equals(item.Tag?.ToString(), useList ? "list" : "manual", StringComparison.OrdinalIgnoreCase))
+            {
+                TargetUrlModeBox.SelectedItem = item;
+                break;
+            }
+        }
+
+        RefreshActiveTargetUrlItems();
+        UpdateTargetUrlControls();
+    }
+
+    private async Task ShowTargetUrlListsDialogAsync()
+    {
+        var statusText = new TextBlock
+        {
+            Text = "TXT format: one URL per line. Domains without https:// are allowed. Empty lines and # comments are ignored.",
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.72
+        };
+        var listView = new ListView
+        {
+            ItemsSource = TargetUrlLists,
+            SelectionMode = ListViewSelectionMode.Single,
+            MaxHeight = 260
+        };
+        listView.SelectedItem = TargetUrlListBox.SelectedItem;
+
+        var addButton = new Button { Content = "Add TXT list" };
+        var removeButton = new Button { Content = "Remove selected" };
+        var resetButton = new Button { Content = "Reset progress" };
+        var buttonPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8
+        };
+        buttonPanel.Children.Add(addButton);
+        buttonPanel.Children.Add(removeButton);
+        buttonPanel.Children.Add(resetButton);
+
+        addButton.Click += async (_, _) =>
+        {
+            var picker = new FileOpenPicker();
+            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+            picker.FileTypeFilter.Add(".txt");
+            var files = await picker.PickMultipleFilesAsync();
+            if (files.Count == 0)
+            {
+                return;
+            }
+
+            var added = 0;
+            foreach (var file in files)
+            {
+                try
+                {
+                    var list = _targetUrlListStore.Import(file.Path);
+                    TargetUrlLists.Add(list);
+                    TargetUrlListBox.SelectedItem = list;
+                    listView.SelectedItem = list;
+                    added++;
+                }
+                catch (Exception ex)
+                {
+                    statusText.Text = ex.Message;
+                }
+            }
+
+            if (added > 0)
+            {
+                SelectTargetUrlMode(true);
+                SyncTargetUrlBoxFromActiveList();
+                UpdateTargetUrlControls();
+                SaveState();
+                statusText.Text = $"Added {added} Target URL list(s).";
+            }
+        };
+
+        removeButton.Click += (_, _) =>
+        {
+            if (listView.SelectedItem is not TargetUrlListEntry list)
+            {
+                statusText.Text = "Select a Target URL list to remove.";
+                return;
+            }
+
+            _targetUrlListStore.Delete(list);
+            TargetUrlLists.Remove(list);
+            var next = TargetUrlLists.FirstOrDefault();
+            TargetUrlListBox.SelectedItem = next;
+            listView.SelectedItem = next;
+            if (next is null)
+            {
+                SelectTargetUrlMode(false);
+            }
+            else
+            {
+                SyncTargetUrlBoxFromActiveList();
+            }
+
+            UpdateTargetUrlControls();
+            SaveState();
+            statusText.Text = $"Removed {list.Name}.";
+        };
+
+        resetButton.Click += (_, _) =>
+        {
+            if (listView.SelectedItem is not TargetUrlListEntry list)
+            {
+                statusText.Text = "Select a Target URL list to reset.";
+                return;
+            }
+
+            list.ResetProgress();
+            if (ReferenceEquals(TargetUrlListBox.SelectedItem, list))
+            {
+                SyncTargetUrlBoxFromActiveList();
+            }
+
+            UpdateTargetUrlControls();
+            SaveState();
+            statusText.Text = $"Reset {list.Name}.";
+        };
+
+        var panel = new StackPanel
+        {
+            Spacing = 10,
+            Width = 560
+        };
+        panel.Children.Add(statusText);
+        panel.Children.Add(buttonPanel);
+        panel.Children.Add(listView);
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Root.XamlRoot,
+            Title = "Target URL lists",
+            Content = panel,
+            CloseButtonText = "Close"
+        };
+        await dialog.ShowAsync();
+        TargetUrlListBox.SelectedItem = listView.SelectedItem ?? TargetUrlListBox.SelectedItem;
+        UpdateTargetUrlControls();
+        SaveState();
     }
 
     private async void StopSync_Click(object sender, RoutedEventArgs e)
@@ -678,6 +1082,27 @@ public sealed partial class MainWindow : Window
         SaveState();
     }
 
+    private void BulkBrowserApply_Click(object sender, RoutedEventArgs e)
+    {
+        var provider = NormalizeBrowserProvider(BulkBrowserBox.SelectedValue?.ToString() ?? _defaultBrowserProvider);
+        var selected = GetSyncSelectedProxies()
+            .DistinctBy(proxy => proxy.StableId)
+            .ToList();
+        if (selected.Count == 0)
+        {
+            ShowMessage("Select proxies first, then press Set browser.", InfoBarSeverity.Warning);
+            return;
+        }
+
+        foreach (var proxy in selected)
+        {
+            proxy.BrowserProvider = provider;
+        }
+
+        SaveState();
+        ShowMessage($"Browser set to {GetBrowserDisplayName(provider)} for {selected.Count} selected proxies.", InfoBarSeverity.Success);
+    }
+
     private void ProxyListItem_RightTapped(object sender, RightTappedRoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not ProxyListEntry list)
@@ -830,7 +1255,8 @@ public sealed partial class MainWindow : Window
         try
         {
             var bridgePath = _jancyLauncher.InstallBridge();
-            var profilePath = _jancyLauncher.ExportProfiles(GetAllLoadedProxies(), TargetUrlBox.Text.Trim());
+            var targetUrl = ResolveTargetUrlForBrowserAction() ?? "";
+            var profilePath = _jancyLauncher.ExportProfiles(GetAllLoadedProxies(), targetUrl);
             ShowMessage($"Jancy bridge installed: {bridgePath}. Profile CSV exported: {profilePath}. Restart Jancy or press Rescan JYL directory.", InfoBarSeverity.Success);
         }
         catch (Exception ex)
@@ -1082,7 +1508,8 @@ Jancy setup:
             }
 
             var completed = 0;
-            var targetUri = Uri.TryCreate(TargetUrlBox.Text.Trim(), UriKind.Absolute, out var parsedTarget)
+            var targetUrl = ResolveTargetUrlForBrowserAction(showMessages: false);
+            var targetUri = Uri.TryCreate(targetUrl, UriKind.Absolute, out var parsedTarget)
                 ? parsedTarget
                 : null;
             using var semaphore = new SemaphoreSlim(12);
@@ -1370,6 +1797,16 @@ Jancy setup:
                 ActiveListKey = _activeList?.Key,
                 SearchText = SearchBox.Text.Trim(),
                 TargetUrl = TargetUrlBox.Text.Trim(),
+                UseTargetUrlList = _useTargetUrlList,
+                DisableTargetUrlAutoAdvance = _disableTargetUrlAutoAdvance,
+                ActiveTargetUrlListKey = (TargetUrlListBox.SelectedItem as TargetUrlListEntry)?.Key,
+                TargetUrlLists = TargetUrlLists.Select(list => new AppStateStore.TargetUrlListState
+                {
+                    Key = list.Key,
+                    Name = list.Name,
+                    Path = list.Path,
+                    CurrentIndex = list.CurrentIndex
+                }).ToList(),
                 SyncMonitorId = (SyncMonitorBox.SelectedItem as SyncMonitorOption)?.Id,
                 BrowserProvider = _defaultBrowserProvider,
                 JancyEndpointUrl = _jancyEndpointUrl,
@@ -1411,11 +1848,30 @@ Jancy setup:
         _gitRepositoryPath = GitAutoUpdater.DetectRepositoryPath();
         _lastUpdatePreviousHead = settings.LastUpdatePreviousHead;
         SearchBox.Text = settings.SearchText;
+        _disableTargetUrlAutoAdvance = settings.DisableTargetUrlAutoAdvance;
+        TargetUrlNoAutoNextBox.IsChecked = _disableTargetUrlAutoAdvance;
 
         if (!string.IsNullOrWhiteSpace(settings.TargetUrl))
         {
             TargetUrlBox.Text = settings.TargetUrl;
         }
+
+        TargetUrlLists.Clear();
+        foreach (var targetUrlListState in settings.TargetUrlLists)
+        {
+            var list = _targetUrlListStore.Load(targetUrlListState);
+            if (list is not null)
+            {
+                TargetUrlLists.Add(list);
+            }
+        }
+
+        TargetUrlListBox.SelectedItem = TargetUrlLists.FirstOrDefault(list =>
+                string.Equals(list.Key, settings.ActiveTargetUrlListKey, StringComparison.OrdinalIgnoreCase))
+            ?? TargetUrlLists.FirstOrDefault();
+        SelectTargetUrlMode(settings.UseTargetUrlList && TargetUrlLists.Count > 0);
+        SyncTargetUrlBoxFromActiveList();
+        UpdateTargetUrlControls();
 
         var paths = settings.CsvPaths.Count > 0
             ? settings.CsvPaths
@@ -2900,7 +3356,8 @@ Jancy setup:
             try
             {
                 var bridgePath = _jancyLauncher.InstallBridge();
-                var profilePath = _jancyLauncher.ExportProfiles(GetAllLoadedProxies(), TargetUrlBox.Text.Trim());
+                var targetUrl = ResolveTargetUrlForBrowserAction() ?? "";
+                var profilePath = _jancyLauncher.ExportProfiles(GetAllLoadedProxies(), targetUrl);
                 ShowMessage($"Installed Jancy bridge. Exported profiles: {profilePath}", InfoBarSeverity.Success);
             }
             catch (Exception ex)

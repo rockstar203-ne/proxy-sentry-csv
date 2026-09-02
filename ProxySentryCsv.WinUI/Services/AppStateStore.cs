@@ -87,6 +87,10 @@ public sealed class AppStateStore
         public string? ActiveListKey { get; set; }
         public string SearchText { get; set; } = "";
         public string TargetUrl { get; set; } = "https://www.browserscan.net";
+        public bool UseTargetUrlList { get; set; }
+        public bool DisableTargetUrlAutoAdvance { get; set; }
+        public string? ActiveTargetUrlListKey { get; set; }
+        public List<TargetUrlListState> TargetUrlLists { get; set; } = [];
         public string? SyncMonitorId { get; set; }
         public string BrowserProvider { get; set; } = "chrome";
         public string JancyEndpointUrl { get; set; } = "http://127.0.0.1:43033";
@@ -99,6 +103,14 @@ public sealed class AppStateStore
         public bool ShowFirefoxEmailButton { get; set; }
         public List<double> ProxyTableColumnWidths { get; set; } = [];
         public List<BrowserExtensionEntry> GlobalExtensions { get; set; } = [];
+    }
+
+    public sealed class TargetUrlListState
+    {
+        public string Key { get; set; } = "";
+        public string Name { get; set; } = "";
+        public string Path { get; set; } = "";
+        public int CurrentIndex { get; set; }
     }
 
     public sealed class ProxyPersistedState

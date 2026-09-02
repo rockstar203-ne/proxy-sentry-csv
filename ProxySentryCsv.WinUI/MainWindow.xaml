@@ -49,6 +49,20 @@
                     <Button x:Name="SettingsButton" Click="Settings_Click" Content="Settings" />
                     <Button x:Name="CheckUpdatesButton" Click="CheckUpdates_Click" Content="Check updates" />
                     <Button x:Name="AboutButton" Click="About_Click" Content="About" />
+                    <ComboBox
+                        x:Name="BulkBrowserBox"
+                        MinWidth="118"
+                        VerticalAlignment="Center"
+                        SelectedValuePath="Tag">
+                        <ComboBoxItem Content="Chrome" IsSelected="True" Tag="chrome" />
+                        <ComboBoxItem Content="Edge" Tag="edge" />
+                        <ComboBoxItem Content="Firefox" Tag="firefox" />
+                        <ComboBoxItem Content="Jancy" Tag="jancy" />
+                    </ComboBox>
+                    <Button
+                        x:Name="BulkBrowserApplyButton"
+                        Click="BulkBrowserApply_Click"
+                        Content="Set browser" />
                 </StackPanel>
             </ScrollViewer>
 
@@ -108,14 +122,92 @@
                 <ColumnDefinition Width="320" />
             </Grid.ColumnDefinitions>
 
-            <TextBox
-                x:Name="TargetUrlBox"
-                Header="Target URL"
-                Text="https://www.browserscan.net" />
+            <Grid ColumnSpacing="8" RowSpacing="6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBox
+                    x:Name="TargetUrlBox"
+                    Header="Target URL"
+                    Text="https://www.browserscan.net" />
+
+                <ComboBox
+                    x:Name="TargetUrlModeBox"
+                    Grid.Column="1"
+                    Header="Mode"
+                    MinWidth="116"
+                    SelectedValuePath="Tag"
+                    SelectionChanged="TargetUrlModeBox_SelectionChanged">
+                    <ComboBoxItem Content="Manual" Tag="manual" />
+                    <ComboBoxItem Content="URL list" Tag="list" />
+                </ComboBox>
+
+                <StackPanel
+                    x:Name="TargetUrlListControlsPanel"
+                    Grid.Row="1"
+                    Grid.ColumnSpan="2"
+                    Orientation="Horizontal"
+                    Spacing="8">
+                    <ComboBox
+                        x:Name="TargetUrlListBox"
+                        Header="URL list"
+                        MinWidth="230"
+                        DisplayMemberPath="DisplayName"
+                        ItemsSource="{x:Bind TargetUrlLists, Mode=OneWay}"
+                        SelectionChanged="TargetUrlListBox_SelectionChanged" />
+                    <ComboBox
+                        x:Name="TargetUrlItemBox"
+                        Header="Current URL"
+                        MinWidth="320"
+                        DisplayMemberPath="DisplayName"
+                        ItemsSource="{x:Bind ActiveTargetUrls, Mode=OneWay}"
+                        SelectionChanged="TargetUrlItemBox_SelectionChanged" />
+                    <TextBlock
+                        x:Name="TargetUrlListProgressText"
+                        MinWidth="90"
+                        Margin="0,0,0,8"
+                        VerticalAlignment="Bottom"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="0 / 0" />
+                    <CheckBox
+                        x:Name="TargetUrlNoAutoNextBox"
+                        Margin="0,0,0,4"
+                        VerticalAlignment="Bottom"
+                        Checked="TargetUrlNoAutoNextBox_Changed"
+                        Content="No auto-next"
+                        Unchecked="TargetUrlNoAutoNextBox_Changed" />
+                    <Button
+                        x:Name="TargetUrlPrevButton"
+                        Margin="0,0,0,1"
+                        VerticalAlignment="Bottom"
+                        Click="TargetUrlPrev_Click"
+                        Content="Prev" />
+                    <Button
+                        x:Name="TargetUrlNextButton"
+                        Margin="0,0,0,1"
+                        VerticalAlignment="Bottom"
+                        Click="TargetUrlNext_Click"
+                        Content="Next" />
+                    <Button
+                        x:Name="TargetUrlListsButton"
+                        Margin="0,0,0,1"
+                        VerticalAlignment="Bottom"
+                        Click="TargetUrlLists_Click"
+                        Content="URL lists" />
+                </StackPanel>
+            </Grid>
 
             <TextBox
                 Grid.Column="1"
                 x:Name="SearchBox"
+                MinWidth="320"
+                VerticalAlignment="Top"
                 Header="Search"
                 PlaceholderText="Name or IP"
                 TextChanged="SearchBox_TextChanged" />
