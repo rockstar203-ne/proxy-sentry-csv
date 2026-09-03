@@ -356,6 +356,11 @@ public sealed class ProxyEntry : INotifyPropertyChanged
 
             _status = value;
             OnPropertyChanged();
+            OnPropertyChanged(nameof(RowBackground));
+            OnPropertyChanged(nameof(SyncRoleText));
+            OnPropertyChanged(nameof(SyncRoleOpacity));
+            OnPropertyChanged(nameof(SyncRoleBadgeWidth));
+            OnPropertyChanged(nameof(SyncRoleBadgeBrush));
         }
     }
 
@@ -470,7 +475,7 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     public string ResponseText => ResponseMs.HasValue ? $"{ResponseMs.Value} ms" : "-";
 
     public string SpeedText => PingMs.HasValue || ResponseMs.HasValue
-        ? $"P {PingText} / R {ResponseText}"
+        ? $"{PingText} / {ResponseText}"
         : "-";
 
     public int SpeedRank => SpeedGroup switch
@@ -482,11 +487,47 @@ public sealed class ProxyEntry : INotifyPropertyChanged
         _ => 4
     };
 
-    public SolidColorBrush RowBackground => SyncSelected
-        ? new SolidColorBrush(ColorHelper.FromArgb(132, 13, 110, 253))
-        : Used
+    private bool HasMasterStatus => Status.Contains("master", StringComparison.OrdinalIgnoreCase);
+
+    private bool HasFollowerStatus => Status.Contains("follower", StringComparison.OrdinalIgnoreCase);
+
+    public string SyncRoleText => HasMasterStatus
+        ? "Master"
+        : HasFollowerStatus ? "Follower" : "";
+
+    public double SyncRoleOpacity => string.IsNullOrWhiteSpace(SyncRoleText) ? 0.0 : 1.0;
+
+    public double SyncRoleBadgeWidth => string.IsNullOrWhiteSpace(SyncRoleText) ? 0.0 : 58.0;
+
+    public SolidColorBrush SyncRoleBadgeBrush => HasMasterStatus
+        ? new SolidColorBrush(ColorHelper.FromArgb(255, 255, 193, 7))
+        : HasFollowerStatus
+            ? new SolidColorBrush(ColorHelper.FromArgb(255, 13, 110, 253))
+            : new SolidColorBrush(Colors.Transparent);
+
+    public SolidColorBrush RowBackground => BuildRowBackground();
+
+    private SolidColorBrush BuildRowBackground()
+    {
+        if (SyncSelected)
+        {
+            return new SolidColorBrush(ColorHelper.FromArgb(132, 13, 110, 253));
+        }
+
+        if (HasMasterStatus)
+        {
+            return new SolidColorBrush(ColorHelper.FromArgb(82, 255, 193, 7));
+        }
+
+        if (HasFollowerStatus)
+        {
+            return new SolidColorBrush(ColorHelper.FromArgb(58, 13, 110, 253));
+        }
+
+        return Used
             ? new SolidColorBrush(ColorHelper.FromArgb(44, 40, 167, 69))
             : new SolidColorBrush(Colors.Transparent);
+    }
 
     public SolidColorBrush UsedBadgeBrush => Used
         ? new SolidColorBrush(ColorHelper.FromArgb(255, 40, 167, 69))

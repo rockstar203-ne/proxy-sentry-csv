@@ -42,6 +42,8 @@ public sealed partial class MainWindow : Window
     private bool _useTargetUrlList;
     private bool _disableTargetUrlAutoAdvance;
     private CancellationTokenSource? _checkAllCancellation;
+    private readonly List<string> _logLines = [];
+    private bool _logExpanded;
     private List<string> _lastJancySyncStableIds = [];
     private List<string> _lastChromeSyncStableIds = [];
     private int _syncClickDelayMs;
@@ -52,7 +54,7 @@ public sealed partial class MainWindow : Window
     private const double ProxyColumnResizeHitWidth = 14;
     private const double ProxyTablePaddingWidth = 20;
     private const double ProxyTableColumnSpacing = 10;
-    private readonly double[] _defaultProxyColumnWidths = [48, 72, 150, 114, 92, 170, 190, 135, 72, 130, 88, 242];
+    private readonly double[] _defaultProxyColumnWidths = [48, 72, 150, 114, 164, 170, 190, 72, 130, 88, 242];
     private readonly List<WeakReference<Grid>> _proxyRowGridRefs = [];
     private int _resizingProxyColumnIndex = -1;
     private double _resizeStartX;
@@ -329,6 +331,7 @@ public sealed partial class MainWindow : Window
                 }
 
                 _lastJancySyncStableIds = selected.Select(proxy => proxy.StableId).ToList();
+                UpdateSyncStatusPanel();
                 ShowMessage($"Jancy group opened: master row {selected[0].RowNumber}, {selected.Count - 1} followers.", InfoBarSeverity.Success);
             }
             else if (IsChromiumSyncProvider(provider))
@@ -368,6 +371,7 @@ public sealed partial class MainWindow : Window
                         DispatcherQueue.TryEnqueue(() => ShowMessage(line, InfoBarSeverity.Informational));
                     });
                 }
+                UpdateSyncStatusPanel();
                 ShowMessage($"{GetBrowserDisplayName(provider)} group opened and aligned: master row {selected[0].RowNumber}, {selected.Count - 1} followers.", InfoBarSeverity.Success);
             }
             else
@@ -420,6 +424,7 @@ public sealed partial class MainWindow : Window
                 }
 
                 _lastChromeSyncStableIds = chromeSelected.Select(proxy => proxy.StableId).ToList();
+                UpdateSyncStatusPanel();
                 ShowMessage($"Chrome sync started: master row {chromeSelected[0].RowNumber}, {chromeSelected.Count - 1} followers.", InfoBarSeverity.Success);
             }
             catch (Exception ex)
@@ -450,6 +455,7 @@ public sealed partial class MainWindow : Window
                 selected[index].Status = index == 0 ? "Sync master" : "Sync follower";
             }
             _lastJancySyncStableIds = selected.Select(proxy => proxy.StableId).ToList();
+            UpdateSyncStatusPanel();
             ShowMessage($"Jancy sync started: master row {selected[0].RowNumber}, {selected.Count - 1} followers.", InfoBarSeverity.Success);
         }
         catch (Exception ex)
@@ -492,6 +498,7 @@ public sealed partial class MainWindow : Window
 
             _lastChromeSyncStableIds = chromeSelected.Select(proxy => proxy.StableId).ToList();
             AdvanceTargetUrlListAfterSuccessfulApply();
+            UpdateSyncStatusPanel();
             SaveState();
             ShowMessage($"Applied Target URL to {affectedCount} Chrome window(s).", InfoBarSeverity.Success);
         }
@@ -959,6 +966,7 @@ public sealed partial class MainWindow : Window
                     proxy.Status = proxy.IsOpen ? $"{GetBrowserDisplayName(proxy.OpenedProvider)} opened" : proxy.Status;
                 }
 
+                UpdateSyncStatusPanel();
                 ShowMessage("Chrome sync stopped. Browser windows stay open.", InfoBarSeverity.Informational);
             }
             catch (Exception ex)
@@ -981,6 +989,7 @@ public sealed partial class MainWindow : Window
             {
                 proxy.Status = proxy.IsOpen ? "Jancy opened" : proxy.Status;
             }
+            UpdateSyncStatusPanel();
             ShowMessage("Jancy sync stopped. Browser windows stay open.", InfoBarSeverity.Informational);
         }
         catch (Exception ex)
@@ -1099,8 +1108,56 @@ public sealed partial class MainWindow : Window
             .ToList();
     }
 
+    private void UpdateSyncStatusPanel()
+    {
+        if (SyncStatusPanel is null || SyncStatusText is null)
+        {
+            return;
+        }
+
+        var chromeGroup = ResolveLastOpenSyncGroup(_lastChromeSyncStableIds, "chrome");
+        if (IsActiveSyncGroup(chromeGroup))
+        {
+            ShowSyncStatusPanel("Chrome", chromeGroup);
+            return;
+        }
+
+        var jancyGroup = ResolveLastOpenSyncGroup(_lastJancySyncStableIds, "jancy");
+        if (IsActiveSyncGroup(jancyGroup))
+        {
+            ShowSyncStatusPanel("Jancy", jancyGroup);
+            return;
+        }
+
+        SyncStatusText.Text = "Sync idle";
+        SyncStatusPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private static bool IsActiveSyncGroup(IReadOnlyList<ProxyEntry> group)
+    {
+        return group.Count >= 2
+            && group.Any(proxy =>
+                proxy.Status.Contains("master", StringComparison.OrdinalIgnoreCase)
+                || proxy.Status.Contains("follower", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void ShowSyncStatusPanel(string browserName, IReadOnlyList<ProxyEntry> group)
+    {
+        var master = group.FirstOrDefault(proxy => proxy.Status.Contains("master", StringComparison.OrdinalIgnoreCase))
+            ?? group[0];
+        var monitor = SyncMonitorBox.SelectedItem as SyncMonitorOption;
+        var monitorText = monitor is null ? "default monitor" : monitor.DisplayName;
+        var delayText = _syncClickDelayMs <= 0
+            ? "off"
+            : $"{_syncClickDelayMs / 1000.0:0.#} sec";
+
+        SyncStatusText.Text = $"{browserName} sync: master row {master.RowNumber}, followers {Math.Max(0, group.Count - 1)}, click delay {delayText}, {monitorText}.";
+        SyncStatusPanel.Visibility = Visibility.Visible;
+    }
+
     private void SyncMonitorBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        UpdateSyncStatusPanel();
         SaveState();
     }
 
@@ -1243,6 +1300,7 @@ public sealed partial class MainWindow : Window
                     chromeSelected[index].Status = index == 0 ? "Chrome aligned master" : "Chrome aligned follower";
                 }
 
+                UpdateSyncStatusPanel();
                 ShowMessage($"Aligned {chromeSelected.Count} Chrome windows.", InfoBarSeverity.Success);
             }
             catch (Exception ex)
@@ -1274,6 +1332,8 @@ public sealed partial class MainWindow : Window
             {
                 selected[index].Status = index == 0 ? "Aligned master" : "Aligned follower";
             }
+
+            UpdateSyncStatusPanel();
             ShowMessage($"Aligned {selected.Count} Jancy windows.", InfoBarSeverity.Success);
         }
         catch (Exception ex)
@@ -1376,7 +1436,7 @@ Jancy setup:
                 proxy.OpenedProvider = "";
                 ClearClosedProxySelection(proxy);
             }
-            UpdateEventSentryBridgeIndicator();
+            UpdateSummary();
         });
     }
 
@@ -2615,6 +2675,7 @@ Jancy setup:
     {
         UpdateEventSentryBridgeIndicator();
         UpdateSelectionSummaryText();
+        UpdateSyncStatusPanel();
     }
 
     private void UpdateEventSentryBridgeIndicator()
@@ -2720,6 +2781,7 @@ Jancy setup:
 
     private void ShowMessage(string message, InfoBarSeverity severity)
     {
+        var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
         LogTitleText.Text = severity switch
         {
             InfoBarSeverity.Error => "Error",
@@ -2727,7 +2789,8 @@ Jancy setup:
             InfoBarSeverity.Success => "Success",
             _ => "Log"
         };
-        LogText.Text = $"[{DateTime.Now:HH:mm:ss}] {message}";
+        LogText.Text = line;
+        AppendLogLine(line);
         LogBorder.BorderBrush = severity switch
         {
             InfoBarSeverity.Error => new SolidColorBrush(ColorHelper.FromArgb(255, 220, 53, 69)),
@@ -2735,6 +2798,40 @@ Jancy setup:
             InfoBarSeverity.Success => new SolidColorBrush(ColorHelper.FromArgb(255, 40, 167, 69)),
             _ => new SolidColorBrush(ColorHelper.FromArgb(255, 108, 117, 125))
         };
+    }
+
+    private void ToggleLog_Click(object sender, RoutedEventArgs e)
+    {
+        _logExpanded = !_logExpanded;
+        LogDetailsScrollViewer.Visibility = _logExpanded ? Visibility.Visible : Visibility.Collapsed;
+        ToggleLogButton.Content = _logExpanded ? "Collapse" : "Expand";
+        RefreshExpandedLogText();
+    }
+
+    private void AppendLogLine(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        _logLines.Add(line);
+        if (_logLines.Count > 250)
+        {
+            _logLines.RemoveRange(0, _logLines.Count - 250);
+        }
+
+        RefreshExpandedLogText();
+    }
+
+    private void RefreshExpandedLogText()
+    {
+        if (LogDetailsText is null)
+        {
+            return;
+        }
+
+        LogDetailsText.Text = string.Join(Environment.NewLine, _logLines);
     }
 
     private void AppendUpdateLog(TextBox target, string message)
@@ -2746,6 +2843,7 @@ Jancy setup:
         target.SelectionStart = target.Text.Length;
         LogTitleText.Text = "Update";
         LogText.Text = line;
+        AppendLogLine(line);
         LogBorder.BorderBrush = new SolidColorBrush(ColorHelper.FromArgb(255, 13, 110, 253));
     }
 
@@ -2791,6 +2889,7 @@ Jancy setup:
         var selected = SyncClickDelayBox.SelectedItem as ComboBoxItem;
         _syncClickDelayMs = int.TryParse(selected?.Tag?.ToString(), out var delayMs) ? delayMs : 0;
         _systemBrowserLauncher.SetChromeCtrlClickDelay(TimeSpan.FromMilliseconds(_syncClickDelayMs));
+        UpdateSyncStatusPanel();
     }
 
     private void ApplyBrowserEmailButtonSettings()
@@ -2857,9 +2956,18 @@ Jancy setup:
             TextWrapping = TextWrapping.Wrap,
             Opacity = 0.82
         };
-        var sectionsHost = new StackPanel
+        var selectedExtensionBrowser = "chrome";
+        var browserTabs = new StackPanel
         {
-            Spacing = 10
+            Orientation = Orientation.Horizontal,
+            Spacing = 8
+        };
+        var chromeTabButton = new Button { MinWidth = 120 };
+        var edgeTabButton = new Button { MinWidth = 120 };
+        var firefoxTabButton = new Button { MinWidth = 120 };
+        var extensionSectionHost = new ContentControl
+        {
+            MinHeight = 300
         };
 
         void RefreshExtensionSections()
@@ -2869,29 +2977,51 @@ Jancy setup:
                 NormalizeGlobalExtensionTargets(extension);
             }
 
-            sectionsHost.Children.Clear();
-            sectionsHost.Children.Add(BuildBrowserExtensionSection(
-                "Chrome",
-                "Runs only with Chrome windows opened by Proxy Sentry CSV.",
-                extension => extension.SupportsChrome,
-                extension => extension.UseChrome,
-                (extension, enabled) => extension.UseChrome = enabled,
-                RefreshExtensionSections));
-            sectionsHost.Children.Add(BuildBrowserExtensionSection(
-                "Edge",
-                "Runs only with Edge windows opened by Proxy Sentry CSV.",
-                extension => extension.SupportsEdge,
-                extension => extension.UseEdge,
-                (extension, enabled) => extension.UseEdge = enabled,
-                RefreshExtensionSections));
-            sectionsHost.Children.Add(BuildBrowserExtensionSection(
-                "Firefox",
-                "Runs only with Firefox windows opened by Proxy Sentry CSV.",
-                extension => extension.SupportsFirefox,
-                extension => extension.UseFirefox,
-                (extension, enabled) => extension.UseFirefox = enabled,
-                RefreshExtensionSections));
+            chromeTabButton.Content = $"Chrome ({GlobalExtensions.Count(extension => extension.SupportsChrome)})";
+            edgeTabButton.Content = $"Edge ({GlobalExtensions.Count(extension => extension.SupportsEdge)})";
+            firefoxTabButton.Content = $"Firefox ({GlobalExtensions.Count(extension => extension.SupportsFirefox)})";
+            ApplyExtensionTabState(chromeTabButton, selectedExtensionBrowser, "chrome");
+            ApplyExtensionTabState(edgeTabButton, selectedExtensionBrowser, "edge");
+            ApplyExtensionTabState(firefoxTabButton, selectedExtensionBrowser, "firefox");
+
+            extensionSectionHost.Content = selectedExtensionBrowser switch
+            {
+                "edge" => BuildBrowserExtensionSection(
+                    "Edge",
+                    "Runs only with Edge windows opened by Proxy Sentry CSV.",
+                    extension => extension.SupportsEdge,
+                    extension => extension.UseEdge,
+                    (extension, enabled) => extension.UseEdge = enabled,
+                    RefreshExtensionSections),
+                "firefox" => BuildBrowserExtensionSection(
+                    "Firefox",
+                    "Runs only with Firefox windows opened by Proxy Sentry CSV.",
+                    extension => extension.SupportsFirefox,
+                    extension => extension.UseFirefox,
+                    (extension, enabled) => extension.UseFirefox = enabled,
+                    RefreshExtensionSections),
+                _ => BuildBrowserExtensionSection(
+                    "Chrome",
+                    "Runs only with Chrome windows opened by Proxy Sentry CSV.",
+                    extension => extension.SupportsChrome,
+                    extension => extension.UseChrome,
+                    (extension, enabled) => extension.UseChrome = enabled,
+                    RefreshExtensionSections)
+            };
         }
+
+        void SelectExtensionBrowser(string browser)
+        {
+            selectedExtensionBrowser = browser;
+            RefreshExtensionSections();
+        }
+
+        chromeTabButton.Click += (_, _) => SelectExtensionBrowser("chrome");
+        edgeTabButton.Click += (_, _) => SelectExtensionBrowser("edge");
+        firefoxTabButton.Click += (_, _) => SelectExtensionBrowser("firefox");
+        browserTabs.Children.Add(chromeTabButton);
+        browserTabs.Children.Add(edgeTabButton);
+        browserTabs.Children.Add(firefoxTabButton);
 
         installStoreButton.Click += async (_, _) =>
         {
@@ -2993,8 +3123,9 @@ Jancy setup:
         panel.Children.Add(storeUrlBox);
         panel.Children.Add(buttonPanel);
         panel.Children.Add(statusText);
+        panel.Children.Add(browserTabs);
         RefreshExtensionSections();
-        panel.Children.Add(sectionsHost);
+        panel.Children.Add(extensionSectionHost);
 
         var scrollViewer = new ScrollViewer
         {
@@ -3016,6 +3147,18 @@ Jancy setup:
         await dialog.ShowAsync();
         ApplyGlobalExtensions();
         SaveState();
+    }
+
+    private static void ApplyExtensionTabState(Button button, string selectedBrowser, string browser)
+    {
+        var isSelected = string.Equals(selectedBrowser, browser, StringComparison.OrdinalIgnoreCase);
+        button.Background = isSelected
+            ? new SolidColorBrush(ColorHelper.FromArgb(255, 13, 110, 253))
+            : new SolidColorBrush(ColorHelper.FromArgb(255, 52, 58, 64));
+        button.Foreground = new SolidColorBrush(Colors.White);
+        button.BorderBrush = isSelected
+            ? new SolidColorBrush(ColorHelper.FromArgb(255, 91, 157, 255))
+            : new SolidColorBrush(ColorHelper.FromArgb(255, 73, 80, 87));
     }
 
     private FrameworkElement BuildBrowserExtensionSection(
