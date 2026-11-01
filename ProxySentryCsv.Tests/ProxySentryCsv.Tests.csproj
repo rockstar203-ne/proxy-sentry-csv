@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/ProxyExporters.cs" Link="Production/ProxyExporters.cs" />
     <Compile Include="../ProxySentryCsv.WinUI/Services/AdsPowerCompatibilityServer.cs" Link="Production/AdsPowerCompatibilityServer.cs" />
     <Compile Include="../ProxySentryCsv.WinUI/Services/ChromeSyncController.cs" Link="Production/ChromeSyncController.cs" />
     <Compile Include="../ProxySentryCsv.WinUI/Models/SyncMonitorOption.cs" Link="Production/SyncMonitorOption.cs" />

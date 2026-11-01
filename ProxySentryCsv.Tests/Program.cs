@@ -9,6 +9,7 @@ using ProxySentryCsv.Models;
 using ProxySentryCsv.Services;
 
 if (args.Contains("--firefox-sync")) return await FirefoxSyncSmoke.RunAsync();
+if (args.Contains("--firefox-grid")) return await FirefoxSyncSmoke.RunAsync("firefox", windowed: true);
 if (args.Contains("--chrome-sync")) return await FirefoxSyncSmoke.RunAsync("chrome");
 if (args.Contains("--ads-fixture")) return await AdsPowerApiTests.FixtureAsync();
 
@@ -17,6 +18,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("AdsPower HTTP contract, pagination and ownership", AdsPowerApiTests.ContractAsync),
     ("AdsPower local access, lifecycle and port conflict", AdsPowerApiTests.LifecycleAsync),
     ("AdsPower port settings persist with compatible defaults", AdsPowerApiTests.SettingsAsync),
+    ("CSV list export is lossless and preserves a locked destination", ListExportTests.RunAsync),
     ("Sync coordinates preserve zero and negative wheel deltas", SyncCoordinates),
     ("Firefox key mapping uses WebDriver values", FirefoxKeys),
     ("HTTP authentication and response", HttpProxy),
@@ -34,6 +36,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Follower queues preserve order independently", QueueIsolation),
     ("Follower queue overflow pauses explicitly", QueueOverflow),
     ("HTTP 403 does not mark transport dead", HttpDenied),
+    ("Refused proxy fails fast without an HTTP attempt", ProxyCheckSpeedTests.RefusedAsync),
+    ("Silent proxy response obeys its budget", ProxyCheckSpeedTests.SilentAsync),
     ("Check cancellation propagates", CheckCancellation),
     ("History omits URL secrets", HistoryPrivacy),
     ("Concurrent history writers preserve entries", HistoryConcurrency),

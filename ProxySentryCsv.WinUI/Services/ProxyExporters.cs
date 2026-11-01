@@ -34,7 +34,13 @@ public static class ProxyExporters
             builder.AppendLine();
         }
 
-        await File.WriteAllTextAsync(path, builder.ToString(), Encoding.UTF8);
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            await File.WriteAllTextAsync(temporary, builder.ToString(), Encoding.UTF8);
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
     public static async Task ExportAdsTxtAsync(string path, IReadOnlyList<ProxyEntry> records, string profileBaseName)

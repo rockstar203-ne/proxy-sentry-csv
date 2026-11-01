@@ -8,19 +8,37 @@ namespace ProxySentryCsv.Services;
 public sealed class ProxySpeedChecker
 {
     public static readonly Uri DefaultTestUri = new("https://www.gstatic.com/generate_204");
+    private readonly TimeSpan _connectTimeout;
+    private readonly TimeSpan _responseTimeout;
+
+    public ProxySpeedChecker() : this(TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(10)) { }
+    internal ProxySpeedChecker(TimeSpan connectTimeout, TimeSpan responseTimeout)
+    {
+        if (connectTimeout <= TimeSpan.Zero || responseTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(connectTimeout));
+        _connectTimeout = connectTimeout;
+        _responseTimeout = responseTimeout;
+    }
 
     public async Task<ProxyCheckResult> CheckAsync(ProxyEntry proxy, Uri? targetUri,
         CancellationToken cancellationToken, LocalProxyRelay? activeRelay = null)
     {
         var target = targetUri ?? DefaultTestUri;
         if (target.Scheme is not ("http" or "https")) throw new ArgumentException("Only HTTP and HTTPS URLs can be checked.");
-        var ping = await MeasureTcpConnectAsync(proxy, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        // An existing relay can be in Direct mode; probing its configured upstream would be misleading.
+        var ping = activeRelay is null ? await MeasureTcpConnectAsync(proxy, cancellationToken) : null;
+        if (activeRelay is null && ping is null)
+            return new ProxyCheckResult(null, null, "Dead", "Proxy unreachable")
+            {
+                ResultKind = "Transport",
+                Detail = $"Cannot connect to the proxy address within {_connectTimeout.TotalSeconds:g} seconds (or the connection was refused). No HTTP or region lookup is needed."
+            };
         using var ownedRelay = activeRelay is null ? LocalProxyRelay.Start(proxy) : null;
         var relay = activeRelay ?? ownedRelay!;
         var failuresBefore = relay.Snapshot.Failures;
         var timer = Stopwatch.StartNew();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        timeout.CancelAfter(_responseTimeout);
         try
         {
             using var handler = new HttpClientHandler
@@ -53,10 +71,11 @@ public sealed class ProxySpeedChecker
         {
             var snapshot = relay.Snapshot;
             var message = snapshot.Failures > failuresBefore ? snapshot.LastError :
-                ex is OperationCanceledException ? "No response within 20 seconds." :
+                ex is OperationCanceledException ? $"No HTTP response within {_responseTimeout.TotalSeconds:g} seconds. The proxy TCP port was reachable; this alone does not prove the proxy is dead." :
                 ex is HttpRequestException requestError ? $"Network error: {requestError.HttpRequestError}." :
                 "Connection failed before an HTTP response was received.";
-            return new ProxyCheckResult(ping, null, "Dead", "Connection error")
+            var responseTimeout = ex is OperationCanceledException && snapshot.Failures == failuresBefore;
+            return new ProxyCheckResult(ping, null, responseTimeout ? "Slow" : "Dead", responseTimeout ? "Response timeout" : "Connection error")
             {
                 ResultKind = ex is OperationCanceledException ? "Timeout" : "Transport",
                 Detail = message
@@ -64,12 +83,12 @@ public sealed class ProxySpeedChecker
         }
     }
 
-    private static async Task<int?> MeasureTcpConnectAsync(ProxyEntry proxy, CancellationToken token)
+    private async Task<int?> MeasureTcpConnectAsync(ProxyEntry proxy, CancellationToken token)
     {
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(5));
+            timeout.CancelAfter(_connectTimeout);
             using var client = new TcpClient();
             var timer = Stopwatch.StartNew();
             await client.ConnectAsync(proxy.Host, proxy.Port, timeout.Token);

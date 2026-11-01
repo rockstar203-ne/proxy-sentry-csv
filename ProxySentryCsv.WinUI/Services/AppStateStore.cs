@@ -97,6 +97,8 @@ public sealed class AppStateStore
         public List<TargetUrlListState> TargetUrlLists { get; set; } = [];
         public string? SyncMonitorId { get; set; }
         public string BrowserProvider { get; set; } = "chrome";
+        public string AppTheme { get; set; } = "system";
+        public string FirefoxExecutablePath { get; set; } = "";
         public string JancyEndpointUrl { get; set; } = "http://127.0.0.1:43033";
         public bool AutoUpdateEnabled { get; set; }
         public string GitRepositoryPath { get; set; } = "";

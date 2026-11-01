@@ -159,9 +159,10 @@ internal static class AdsPowerApiTests
         {
             var store = new AppStateStore(root);
             Check(store.LoadSettings().AdsPowerApiPort == 50325, "default port");
-            store.SaveState([], new AppStateStore.AppSettings { AdsPowerCompatibilityEnabled = true, AdsPowerApiPort = 51325 });
+            store.SaveState([], new AppStateStore.AppSettings { AdsPowerCompatibilityEnabled = true, AdsPowerApiPort = 51325, AppTheme = "dark", FirefoxExecutablePath = @"C:\Browsers\firefox.exe" });
             var saved = new AppStateStore(root).LoadSettings();
             Check(saved.AdsPowerCompatibilityEnabled && saved.AdsPowerApiPort == 51325, "port setting did not survive reload");
+            Check(saved.AppTheme == "dark" && saved.FirefoxExecutablePath == @"C:\Browsers\firefox.exe", "theme/browser settings lost");
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         return Task.CompletedTask;

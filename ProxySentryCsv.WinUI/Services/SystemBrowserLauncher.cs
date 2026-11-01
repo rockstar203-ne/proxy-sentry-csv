@@ -121,7 +121,10 @@ public sealed partial class SystemBrowserLauncher : IDisposable
         }
 
         await CloseAsync(proxy);
-        var executablePath = await ResolveBrowserExecutableAsync(normalizedProvider, progress);
+        var executablePath = normalizedProvider == "firefox" && !string.IsNullOrWhiteSpace(FirefoxExecutablePath)
+            ? Path.GetFullPath(FirefoxExecutablePath) : await ResolveBrowserExecutableAsync(normalizedProvider, progress);
+        if (!File.Exists(executablePath)) throw new FileNotFoundException("The configured browser executable was not found. Check Settings.", executablePath);
+        progress?.Invoke($"Browser executable: {executablePath}");
         var browserVersion = GetBrowserVersion(executablePath);
         var browserMajor = browserVersion.Major;
         var fingerprint = await _fingerprints.GetOrCreateAsync(proxy, normalizedProvider, browserMajor, progress);
@@ -285,6 +288,8 @@ public sealed partial class SystemBrowserLauncher : IDisposable
         }
 
     }
+
+    public string FirefoxExecutablePath { get; set; } = "";
 
     public async Task<BrowserLeaseResult> EnsureNativeReadyForEventSentryAsync(
         ProxyEntry proxy,

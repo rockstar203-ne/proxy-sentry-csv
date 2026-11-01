@@ -50,6 +50,9 @@ public sealed partial class MainWindow : Window
     private bool _showChromeEmailButton;
     private bool _showEdgeEmailButton;
     private bool _showFirefoxEmailButton;
+    private string _appTheme = "system";
+    private string _firefoxExecutablePath = "";
+    private bool _savingFavorites;
     private const double ProxyColumnMinWidth = 44;
     private const double ProxyColumnResizeHitWidth = 14;
     private const double ProxyTablePaddingWidth = 20;
@@ -1200,6 +1203,15 @@ public sealed partial class MainWindow : Window
 
     private async Task SaveFavoritesListAsync()
     {
+        if (_savingFavorites) return;
+        _savingFavorites = true;
+        try { await SaveFavoritesListCoreAsync(); }
+        catch (Exception ex) { ShowMessage($"Could not save the list: {ex.Message}", InfoBarSeverity.Error); }
+        finally { _savingFavorites = false; }
+    }
+
+    private async Task SaveFavoritesListCoreAsync()
+    {
         RefreshFavoritesList();
         var records = _favoritesList?.Items.ToList() ?? [];
         if (records.Count == 0)
@@ -1584,7 +1596,7 @@ Jancy setup:
             var targetUri = Uri.TryCreate(targetUrl, UriKind.Absolute, out var parsedTarget)
                 ? parsedTarget
                 : null;
-            using var semaphore = new SemaphoreSlim(4);
+            using var semaphore = new SemaphoreSlim(8);
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
             _checkAllCancellation = timeout;
 
@@ -1616,15 +1628,21 @@ Jancy setup:
                     {
                         Interlocked.Increment(ref historyFailures);
                     }
-                    try
+                    if (result.SpeedGroup != "Dead" && result.HttpStatus is not null && result.HttpStatus != 407)
                     {
-                        var geo = await _proxyGeoService.GetAsync(proxy, cancellationToken: timeout.Token);
-                        await RunOnUiAsync(() => ApplyProxyGeo(proxy, geo));
-                    }
-                    catch (OperationCanceledException) when (timeout.IsCancellationRequested) { }
-                    catch
-                    {
-                        // Region is supplemental; preserve the completed connection result.
+                        try
+                        {
+                            using var geoTimeout = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+                            geoTimeout.CancelAfter(TimeSpan.FromSeconds(4));
+                            var geo = await _proxyGeoService.GetAsync(proxy, cancellationToken: geoTimeout.Token);
+                            if (!string.IsNullOrWhiteSpace(geo.CountryCode))
+                                await RunOnUiAsync(() => ApplyProxyGeo(proxy, geo));
+                        }
+                        catch (OperationCanceledException) { }
+                        catch
+                        {
+                            // Region is supplemental; preserve the completed connection result.
+                        }
                     }
                 }
                 catch (OperationCanceledException)
@@ -1917,6 +1935,13 @@ Jancy setup:
 
     private void SaveState()
     {
+        try { SaveStateCore(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        { ShowMessage($"Settings could not be saved: {ex.Message}. Check file access and retry.", InfoBarSeverity.Error); }
+    }
+
+    private void SaveStateCore()
+    {
         if (_suppressStateSave)
         {
             return;
@@ -1954,6 +1979,8 @@ Jancy setup:
                 ShowFirefoxEmailButton = _showFirefoxEmailButton,
                 AdsPowerCompatibilityEnabled = _adsPowerApiEnabled,
                 AdsPowerApiPort = _adsPowerApiPort,
+                AppTheme = _appTheme,
+                FirefoxExecutablePath = _firefoxExecutablePath,
                 ProxyTableColumnWidths = CaptureProxyColumnWidths(),
                 GlobalExtensions = GlobalExtensions.ToList()
             });
@@ -1962,6 +1989,10 @@ Jancy setup:
     private void RestoreSavedState()
     {
         var settings = _stateStore.LoadSettings();
+        _appTheme = settings.AppTheme is "light" or "dark" ? settings.AppTheme : "system";
+        Root.RequestedTheme = _appTheme switch { "light" => ElementTheme.Light, "dark" => ElementTheme.Dark, _ => ElementTheme.Default };
+        _firefoxExecutablePath = settings.FirefoxExecutablePath ?? "";
+        _systemBrowserLauncher.FirefoxExecutablePath = _firefoxExecutablePath;
         EnsureFavoritesList();
         SelectSyncMonitor(settings.SyncMonitorId);
         _defaultBrowserProvider = NormalizeBrowserProvider(settings.BrowserProvider);
@@ -3558,6 +3589,13 @@ Jancy setup:
 
     private async void Settings_Click(object sender, RoutedEventArgs e)
     {
+        var themeBox = new ComboBox { Header = "Application theme", SelectedValuePath = "Tag", Width = 220 };
+        themeBox.Items.Add(new ComboBoxItem { Content = "System", Tag = "system" });
+        themeBox.Items.Add(new ComboBoxItem { Content = "Light", Tag = "light" });
+        themeBox.Items.Add(new ComboBoxItem { Content = "Dark", Tag = "dark" });
+        SelectComboBoxValue(themeBox, _appTheme);
+        var firefoxPathBox = new TextBox { Header = "Firefox executable (optional)", Text = _firefoxExecutablePath, PlaceholderText = @"C:\Program Files\Mozilla Firefox\firefox.exe" };
+        var firefoxPathError = new TextBlock { Text = "Choose an existing firefox.exe, or leave the path empty for automatic detection.", TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
         var adsPowerBox = new CheckBox { Content = "AdsPower-compatible API", IsChecked = _adsPowerApiEnabled };
         var adsPowerPortBox = new TextBox
         {
@@ -3649,6 +3687,9 @@ Jancy setup:
         panel.Children.Add(endpointBox);
         panel.Children.Add(installBridgeButton);
         panel.Children.Add(defaultBrowserBox);
+        panel.Children.Add(themeBox);
+        panel.Children.Add(firefoxPathBox);
+        panel.Children.Add(firefoxPathError);
         panel.Children.Add(emailButtonPanel);
         panel.Children.Add(adsPowerBox);
         panel.Children.Add(adsPowerPortBox);
@@ -3679,9 +3720,12 @@ Jancy setup:
         var requestedAdsPort = _adsPowerApiPort;
         dialog.PrimaryButtonClick += (_, args) =>
         {
+            var firefoxPath = firefoxPathBox.Text.Trim().Trim('"');
+            var validFirefox = firefoxPath.Length == 0 || (System.IO.Path.IsPathFullyQualified(firefoxPath) && File.Exists(firefoxPath) && string.Equals(System.IO.Path.GetFileName(firefoxPath), "firefox.exe", StringComparison.OrdinalIgnoreCase));
+            firefoxPathError.Visibility = validFirefox ? Visibility.Collapsed : Visibility.Visible;
             var valid = int.TryParse(adsPowerPortBox.Text, out requestedAdsPort) && requestedAdsPort is >= 1 and <= 65535;
             adsPowerPortError.Visibility = valid ? Visibility.Collapsed : Visibility.Visible;
-            args.Cancel = !valid;
+            args.Cancel = !valid || !validFirefox;
             if (!valid) adsPowerPortBox.Focus(FocusState.Programmatic);
         };
         var result = await dialog.ShowAsync();
@@ -3698,6 +3742,11 @@ Jancy setup:
         _showChromeEmailButton = chromeEmailButtonBox.IsChecked == true;
         _showEdgeEmailButton = edgeEmailButtonBox.IsChecked == true;
         _showFirefoxEmailButton = firefoxEmailButtonBox.IsChecked == true;
+        _appTheme = (themeBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "system";
+        Root.RequestedTheme = _appTheme switch { "light" => ElementTheme.Light, "dark" => ElementTheme.Dark, _ => ElementTheme.Default };
+        ApplyTitleBarTheme();
+        _firefoxExecutablePath = firefoxPathBox.Text.Trim().Trim('"');
+        _systemBrowserLauncher.FirefoxExecutablePath = _firefoxExecutablePath;
         await ConfigureAdsPowerApiAsync(adsPowerBox.IsChecked == true, requestedAdsPort);
         ApplyBrowserEmailButtonSettings();
         _gitRepositoryPath = GetConfiguredRepositoryPath();

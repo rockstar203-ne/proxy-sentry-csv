@@ -229,14 +229,23 @@ internal sealed class ChromeSyncController : IDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
             var placement = placements[index];
-            var hwnd = FindMainWindow(active[index].Process.Id);
+            var hwnd = IntPtr.Zero;
+            for (var attempt = 0; attempt < 100; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (active[index].Process.HasExited) throw new InvalidOperationException($"Browser row {active[index].RowNumber} closed before alignment.");
+                hwnd = FindMainWindow(active[index].Process.Id);
+                if (hwnd != IntPtr.Zero) break;
+                await Task.Delay(100, cancellationToken);
+            }
             if (hwnd == IntPtr.Zero)
             {
-                continue;
+                throw new InvalidOperationException($"Browser row {active[index].RowNumber} has no ready window. Retry Align windows after startup.");
             }
 
             ShowWindow(hwnd, ShowWindowRestore);
-            SetWindowPos(hwnd, IntPtr.Zero, placement.X, placement.Y, placement.Width, placement.Height, SwpNoZOrder | SwpShowWindow);
+            if (!SetWindowPos(hwnd, IntPtr.Zero, placement.X, placement.Y, placement.Width, placement.Height, SwpNoZOrder | SwpShowWindow))
+                throw new InvalidOperationException($"Could not align browser row {active[index].RowNumber}.");
             await Task.Delay(30, cancellationToken);
         }
     }
@@ -1414,22 +1423,65 @@ internal sealed class ChromeSyncController : IDisposable
             : null;
     }
 
-    private static IntPtr FindMainWindow(int processId)
+    internal static IntPtr FindMainWindow(int processId)
     {
         var result = IntPtr.Zero;
+        long largestArea = 0;
+        var processIds = DescendantProcesses(processId);
         EnumWindows((hwnd, _) =>
         {
             GetWindowThreadProcessId(hwnd, out var windowProcessId);
-            if (windowProcessId == processId && IsWindowVisible(hwnd))
+            if (processIds.Contains(windowProcessId) && IsWindowVisible(hwnd) && GetWindowRect(hwnd, out var rect)
+                && (GetClassName(hwnd) is "MozillaWindowClass" or "Chrome_WidgetWin_1")
+                && (long)rect.Width * rect.Height > largestArea)
             {
                 result = hwnd;
-                return false;
+                largestArea = (long)rect.Width * rect.Height;
             }
 
             return true;
         }, IntPtr.Zero);
         return result;
     }
+
+    private static HashSet<int> DescendantProcesses(int processId)
+    {
+        var ids = new HashSet<int> { processId };
+        // Firefox's Windows launcher can own a child browser process with the actual UI.
+        var snapshot = CreateToolhelp32Snapshot(2, 0);
+        if (snapshot == new IntPtr(-1)) return ids;
+        try
+        {
+            var parents = new List<(int Id, int Parent)>();
+            var entry = new ProcessEntry { Size = (uint)Marshal.SizeOf<ProcessEntry>() };
+            if (Process32First(snapshot, ref entry))
+                do { parents.Add(((int)entry.Id, (int)entry.ParentId)); } while (Process32Next(snapshot, ref entry));
+            bool changed;
+            do
+            {
+                changed = false;
+                foreach (var pair in parents)
+                    if (ids.Contains(pair.Parent)) changed |= ids.Add(pair.Id);
+            } while (changed);
+        }
+        finally { CloseHandle(snapshot); }
+        return ids;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProcessEntry
+    {
+        public uint Size, Usage, Id;
+        public UIntPtr Heap;
+        public uint ModuleId, Threads, ParentId;
+        public int Priority;
+        public uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Exe;
+    }
+    [DllImport("kernel32.dll")] private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "Process32FirstW")] private static extern bool Process32First(IntPtr snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "Process32NextW")] private static extern bool Process32Next(IntPtr snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
 
     private static string GetClassName(IntPtr hwnd)
     {

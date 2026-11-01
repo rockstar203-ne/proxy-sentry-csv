@@ -3,13 +3,14 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using ProxySentryCsv.Services;
 
 internal static class FirefoxSyncSmoke
 {
-    public static async Task<int> RunAsync(string provider = "firefox")
+    public static async Task<int> RunAsync(string provider = "firefox", bool windowed = false)
     {
         var executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             provider == "firefox" ? @"Mozilla Firefox\firefox.exe" : @"Google\Chrome\Application\chrome.exe");
@@ -63,14 +64,31 @@ internal static class FirefoxSyncSmoke
                 var profile = Path.Combine(root, i.ToString());
                 Directory.CreateDirectory(profile);
                 var port = FreePort();
-                var start = new ProcessStartInfo(executable) { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
+                var start = new ProcessStartInfo(executable) { UseShellExecute = false, WindowStyle = windowed ? ProcessWindowStyle.Normal : ProcessWindowStyle.Hidden };
                 var launchArgs = provider == "firefox"
                     ? new[] { "-headless", "-no-remote", "-profile", profile, "--remote-debugging-port", port.ToString(), "--width", "900", "--height", "700", url }
                     : new[] { "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--user-data-dir=" + profile, "--remote-debugging-port=" + port, "--window-size=900,700", url };
-                foreach (var arg in launchArgs)
+                foreach (var arg in launchArgs.Where(a => !windowed || a != "-headless"))
                     start.ArgumentList.Add(arg);
                 var process = Process.Start(start)!;
                 sessions.Add(new SystemBrowserSyncSession("test-" + i, i + 1, process, provider, port));
+            }
+            if (windowed)
+            {
+                var monitor = new ProxySentryCsv.Models.SyncMonitorOption { AvailLeft = 20, AvailTop = 20, AvailWidth = 1500, AvailHeight = 700 };
+                await ChromeSyncController.ArrangeAsync(sessions, monitor, stop.Token);
+                await Task.Delay(500);
+                var expected = ChromeSyncController.CalculateWindowPlacements(sessions.Count, monitor);
+                for (var i = 0; i < sessions.Count; i++)
+                {
+                    sessions[i].Process.Refresh();
+                    var handle = ChromeSyncController.FindMainWindow(sessions[i].Process.Id);
+                    Check(handle != IntPtr.Zero && GetWindowRect(handle, out var rect)
+                        && Math.Abs(rect.Left - expected[i].X) <= 2 && Math.Abs(rect.Top - expected[i].Y) <= 2
+                        && Math.Abs(rect.Right - rect.Left - expected[i].Width) <= 2
+                        && Math.Abs(rect.Bottom - rect.Top - expected[i].Height) <= 2, "visible Firefox grid bounds");
+                }
+                Console.WriteLine("PASS real Firefox windows positioned and resized in grid immediately after launch");
             }
             await sync.StartAsync(sessions, Console.WriteLine, stop.Token);
             var clients = Clients(sync);
@@ -118,7 +136,17 @@ internal static class FirefoxSyncSmoke
             sync.Stop();
             return 0;
         }
-        catch (Exception ex) { Console.WriteLine($"FAIL {provider} smoke: " + ex); return 1; }
+        catch (Exception ex)
+        {
+            foreach (var session in sessions) Console.WriteLine($"Test process {session.Process.Id}, main handle {session.Process.MainWindowHandle}");
+            EnumWindows((hwnd, _) =>
+            {
+                var name = new StringBuilder(256); GetClassName(hwnd, name, name.Capacity);
+                if (name.ToString().Contains("Mozilla")) { GetWindowThreadProcessId(hwnd, out var pid); Console.WriteLine($"Firefox HWND {hwnd}, class {name}, PID {pid}, visible {IsWindowVisible(hwnd)}"); }
+                return true;
+            }, IntPtr.Zero);
+            Console.WriteLine($"FAIL {provider} smoke: " + ex); return 1;
+        }
         finally
         {
             sync.Stop();
@@ -140,6 +168,14 @@ internal static class FirefoxSyncSmoke
     private static List<IBrowserSyncClient> Clients(ChromeSyncController sync) =>
         ((IEnumerable)typeof(ChromeSyncController).GetField("_tabs", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(sync)!)
             .Cast<object>().Select(tab => (IBrowserSyncClient)tab.GetType().GetProperty("Client")!.GetValue(tab)!).ToList();
+    [StructLayout(LayoutKind.Sequential)] private struct WindowRect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr window, out WindowRect rect);
+    private delegate bool EnumWindowProc(IntPtr window, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowProc callback, IntPtr data);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder name, int count);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
     private static int FreePort() { var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start(); var port = ((IPEndPoint)listener.LocalEndpoint).Port; listener.Stop(); return port; }
     private static void Check(bool ok, string message) { if (!ok) throw new Exception(message); }
     private static async Task Wait(Func<Task<bool>> condition)
