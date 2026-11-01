@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/AdsPowerCompatibilityServer.cs" Link="Production/AdsPowerCompatibilityServer.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/ChromeSyncController.cs" Link="Production/ChromeSyncController.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Models/SyncMonitorOption.cs" Link="Production/SyncMonitorOption.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/IBrowserSyncClient.cs" Link="Production/IBrowserSyncClient.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/ChromeDevToolsClient.cs" Link="Production/ChromeDevToolsClient.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/FirefoxSyncClient.cs" Link="Production/FirefoxSyncClient.cs" />
+    <PackageReference Include="MailKit" Version="4.17.0" />
+    <Compile Include="../ProxySentryCsv.WinUI/Models/ProxyEntry.cs" Link="Production/ProxyEntry.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/LocalProxyRelay.cs" Link="Production/LocalProxyRelay.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/AtomicJsonFile.cs" Link="Production/AtomicJsonFile.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/AppJsonOptions.cs" Link="Production/AppJsonOptions.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/ProfileIdentityStore.cs" Link="Production/ProfileIdentityStore.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/CsvProxyLoader.cs" Link="Production/CsvProxyLoader.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/WindowActionQueue.cs" Link="Production/WindowActionQueue.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/ProxySpeedChecker.cs" Link="Production/ProxySpeedChecker.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/ConnectionHistoryStore.cs" Link="Production/ConnectionHistoryStore.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/WorkspaceSessionStore.cs" Link="Production/WorkspaceSessionStore.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/BrowserCacheService.cs" Link="Production/BrowserCacheService.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/BrowserCacheService.Profiles.cs" Link="Production/BrowserCacheService.Profiles.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/AppStateStore.cs" Link="Production/AppStateStore.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/BrowserForgeFingerprintService.cs" Link="Production/BrowserForgeFingerprintService.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/ProxyGeoService.cs" Link="Production/ProxyGeoService.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/FirefoxNativePreferences.cs" Link="Production/FirefoxNativePreferences.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Services/BrowserRegionDiagnostics.cs" Link="Production/BrowserRegionDiagnostics.cs" />
+    <Compile Include="../ProxySentryCsv.WinUI/Models/BrowserExtensionEntry.cs" Link="Production/BrowserExtensionEntry.cs" />
+  </ItemGroup>
+</Project>

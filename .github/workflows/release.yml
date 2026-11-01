@@ -33,6 +33,9 @@ jobs:
       - name: Build
         run: dotnet build ProxySentryCSV.sln -c Release --no-restore
 
+      - name: Transport and state regression tests
+        run: dotnet run --project ProxySentryCsv.Tests/ProxySentryCsv.Tests.csproj -c Release
+
       - name: Publish
         run: |
           dotnet publish ProxySentryCsv.WinUI/ProxySentryCsv.WinUI.csproj -c Release -p:Platform=x64 -r win-x64 --self-contained true -o release/components

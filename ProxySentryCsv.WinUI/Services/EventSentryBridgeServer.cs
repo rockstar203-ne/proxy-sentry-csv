@@ -34,6 +34,18 @@ public sealed class EventSentryBridgeServer : IDisposable
     private readonly Dictionary<string, BridgeLease> _leases = new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _stop = new();
     private Task? _serverTask;
+    private bool _compatibilityMode;
+    private int _acquiring;
+
+    public bool TrySetCompatibilityMode(bool enabled)
+    {
+        lock (_gate)
+        {
+            if (enabled && (_acquiring > 0 || _leases.Count > 0)) return false;
+            _compatibilityMode = enabled;
+            return true;
+        }
+    }
 
     public EventSentryBridgeServer(
         DispatcherQueue dispatcher,
@@ -264,14 +276,27 @@ public sealed class EventSentryBridgeServer : IDisposable
 
     private async Task<BridgeResponse> HandleAcquireAsync(BridgeRequest request, CancellationToken cancellationToken)
     {
+        lock (_gate)
+        {
+            if (_compatibilityMode)
+                return BridgeResponse.Fail(ProtocolVersion, request.RequestId, "Disable AdsPower compatibility in Proxy Sentry Settings before acquiring Event Sentry bridge profiles.");
+            _acquiring++;
+        }
+        try { return await HandleAcquireCoreAsync(request, cancellationToken); }
+        finally { lock (_gate) _acquiring--; }
+    }
+
+    private async Task<BridgeResponse> HandleAcquireCoreAsync(BridgeRequest request, CancellationToken cancellationToken)
+    {
         if (string.IsNullOrWhiteSpace(request.RunId))
         {
             return BridgeResponse.Fail(ProtocolVersion, request.RequestId, "runId is required.");
         }
 
-        if (!string.Equals(NormalizeCommand(request.Browser), "chrome", StringComparison.OrdinalIgnoreCase))
+        var browser = NormalizeCommand(request.Browser);
+        if (browser != "auto")
         {
-            return BridgeResponse.Fail(ProtocolVersion, request.RequestId, "Only browser: chrome is supported for Event Sentry profile mode.");
+            return BridgeResponse.Fail(ProtocolVersion, request.RequestId, "Update Event Sentry: browser must be selected per profile in Proxy Sentry (browser=auto).");
         }
 
         var candidates = await GetEventProfilesAsync();
@@ -281,6 +306,7 @@ public sealed class EventSentryBridgeServer : IDisposable
         }
 
         var acquired = new List<BridgeProfile>();
+        var failures = new List<string>();
         foreach (var proxy in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -328,21 +354,11 @@ public sealed class EventSentryBridgeServer : IDisposable
 
             try
             {
-                var leaseResult = await _launcher.EnsureChromeReadyForEventSentryAsync(
-                    proxy,
-                    request.RunId,
-                    request.Background,
-                    line => _log($"Event Sentry {profileId}: {line}"),
-                    cancellationToken);
-
-                var lease = new BridgeLease(
-                    profileId,
-                    request.RunId,
-                    "leased",
-                    leaseResult.CdpEndpoint,
-                    leaseResult.Browser,
-                    leaseResult.ProcessId,
-                    requiresCleanup);
+                var leaseResult = await _launcher.EnsureNativeReadyForEventSentryAsync(
+                    proxy, request.RunId, request.Background,
+                    line => _log($"Event Sentry {profileId}: {line}"), cancellationToken);
+                var lease = new BridgeLease(profileId, request.RunId, "leased", leaseResult.CdpEndpoint,
+                    leaseResult.Browser, leaseResult.ProcessId, requiresCleanup, leaseResult.BidiEndpoint);
                 lock (_gate)
                 {
                     _leases[profileId] = lease;
@@ -351,7 +367,7 @@ public sealed class EventSentryBridgeServer : IDisposable
                 await UpdateProxyAsync(profileId, proxyEntry =>
                 {
                     proxyEntry.IsOpen = true;
-                    proxyEntry.OpenedProvider = "chrome";
+                    proxyEntry.OpenedProvider = leaseResult.Browser;
                     proxyEntry.Used = true;
                     proxyEntry.EventSentryState = "Leased";
                     proxyEntry.EventSentryRunId = request.RunId;
@@ -363,6 +379,7 @@ public sealed class EventSentryBridgeServer : IDisposable
             }
             catch (Exception ex)
             {
+                failures.Add($"{profileId}: {ex.Message}");
                 await UpdateProxyAsync(profileId, proxyEntry =>
                 {
                     proxyEntry.EventSentryState = "Error";
@@ -374,7 +391,9 @@ public sealed class EventSentryBridgeServer : IDisposable
 
         if (acquired.Count == 0)
         {
-            return BridgeResponse.Fail(ProtocolVersion, request.RequestId, "No Event Sentry profiles could be acquired.")
+            return BridgeResponse.Fail(ProtocolVersion, request.RequestId, failures.Count > 0
+                ? "No Event Sentry profiles could be acquired. " + string.Join(" ", failures.Take(3))
+                : "No Event Sentry profiles could be acquired. The selected profiles may be busy or holding carts.")
                 with
                 {
                     SelectedCount = candidates.Count,
@@ -482,7 +501,7 @@ public sealed class EventSentryBridgeServer : IDisposable
         return BridgeResponse.Success(ProtocolVersion, request.RequestId, "Profile brought to front.")
             with
             {
-                Profiles = [lease.ToProfile(proxy)]
+                Profiles = [lease.ToProfile()]
             };
     }
 
@@ -717,12 +736,14 @@ public sealed class EventSentryBridgeServer : IDisposable
             string cdpEndpoint,
             string browser,
             int processId,
-            bool requiresCleanup)
+            bool requiresCleanup,
+            string bidiEndpoint)
         {
             ProfileId = profileId;
             RunId = runId;
             State = state;
             CdpEndpoint = cdpEndpoint;
+            BidiEndpoint = bidiEndpoint;
             Browser = browser;
             ProcessId = processId;
             RequiresCleanup = requiresCleanup;
@@ -733,6 +754,7 @@ public sealed class EventSentryBridgeServer : IDisposable
         public string RunId { get; }
         public string State { get; private set; }
         public string CdpEndpoint { get; }
+        public string BidiEndpoint { get; }
         public string Browser { get; }
         public int ProcessId { get; }
         public bool RequiresCleanup { get; private set; }
@@ -762,6 +784,7 @@ public sealed class EventSentryBridgeServer : IDisposable
                     ? $"Proxy {ProfileId}"
                     : proxy!.DisplayName,
                 CdpEndpoint = CdpEndpoint,
+                BidiEndpoint = BidiEndpoint,
                 Browser = Browser,
                 ProcessId = ProcessId,
                 State = State,
@@ -781,7 +804,7 @@ public sealed class EventSentryBridgeServer : IDisposable
         public string Message { get; init; } = "";
         public string ShowUrl { get; init; } = "";
         public bool KeepOpen { get; init; } = true;
-        public string Browser { get; init; } = "chrome";
+        public string Browser { get; init; } = "auto";
         public bool Background { get; init; } = true;
     }
 
@@ -827,6 +850,7 @@ public sealed class EventSentryBridgeServer : IDisposable
         public int RowNumber { get; init; }
         public string DisplayName { get; init; } = "";
         public string CdpEndpoint { get; init; } = "";
+        public string BidiEndpoint { get; init; } = "";
         public string Browser { get; init; } = "chrome";
         public int ProcessId { get; init; }
         public string State { get; init; } = "";

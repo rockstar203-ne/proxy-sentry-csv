@@ -32,6 +32,9 @@ public sealed class AppStateStore
             proxy => new ProxyPersistedState
             {
                 DisplayName = proxy.DisplayName,
+                Notes = proxy.Notes,
+                Tags = proxy.Tags,
+                LastUsedUtc = proxy.LastUsedUtc,
                 Used = proxy.Used,
                 Copied = proxy.Copied,
                 IsFavorite = proxy.IsFavorite,
@@ -52,7 +55,7 @@ public sealed class AppStateStore
             ProxyStates = proxyStates,
             Settings = settings
         };
-        File.WriteAllText(_statePath, JsonSerializer.Serialize(state, AppJsonOptions.Indented));
+        AtomicJsonFile.Write(_statePath, state);
     }
 
     public void SaveProxyStates(IEnumerable<ProxyEntry> proxies)
@@ -64,15 +67,15 @@ public sealed class AppStateStore
     {
         try
         {
-            var path = File.Exists(_statePath)
+            var path = File.Exists(_statePath) || File.Exists(_statePath + ".bak")
                 ? _statePath
                 : _legacyStatePath;
-            if (!File.Exists(path))
+            if (!File.Exists(path) && !File.Exists(path + ".bak"))
             {
                 return new AppState();
             }
 
-            return JsonSerializer.Deserialize<AppState>(File.ReadAllText(path)) ?? new AppState();
+            return AtomicJsonFile.Read<AppState>(path) ?? new AppState();
         }
         catch
         {
@@ -86,6 +89,7 @@ public sealed class AppStateStore
         public List<string> CsvPaths { get; set; } = [];
         public string? ActiveListKey { get; set; }
         public string SearchText { get; set; } = "";
+        public string ProfileFilter { get; set; } = "all";
         public string TargetUrl { get; set; } = "https://www.browserscan.net";
         public bool UseTargetUrlList { get; set; }
         public bool DisableTargetUrlAutoAdvance { get; set; }
@@ -101,6 +105,8 @@ public sealed class AppStateStore
         public bool ShowChromeEmailButton { get; set; }
         public bool ShowEdgeEmailButton { get; set; }
         public bool ShowFirefoxEmailButton { get; set; }
+        public bool AdsPowerCompatibilityEnabled { get; set; }
+        public int AdsPowerApiPort { get; set; } = AdsPowerCompatibilityServer.DefaultPort;
         public List<double> ProxyTableColumnWidths { get; set; } = [];
         public List<BrowserExtensionEntry> GlobalExtensions { get; set; } = [];
     }
@@ -116,6 +122,9 @@ public sealed class AppStateStore
     public sealed class ProxyPersistedState
     {
         public string DisplayName { get; set; } = "";
+        public string Notes { get; set; } = "";
+        public string Tags { get; set; } = "";
+        public DateTimeOffset? LastUsedUtc { get; set; }
         public bool Used { get; set; }
         public bool Copied { get; set; }
         public bool IsFavorite { get; set; }

@@ -31,7 +31,6 @@ internal sealed class ChromeSyncController : IDisposable
     private long _lastMouseMoveTicks;
     private string _lastMasterUrl = "";
     private bool _navigationReplay;
-    private int _inputReplayDepth;
     private long _lastBridgeMoveTicks;
     private long _lastBridgePressTicks;
     private long _lastBridgeReleaseTicks;
@@ -60,11 +59,16 @@ internal sealed class ChromeSyncController : IDisposable
         }
     }
 
+    public WindowQueueSnapshot? GetQueueSnapshot(string profileId)
+    {
+        lock (_gate) return _tabs.FirstOrDefault(t => t.Session.StableId == profileId)?.Queue?.Snapshot;
+    }
+
     public async Task StartAsync(IReadOnlyList<SystemBrowserSyncSession> sessions, Action<string>? progress = null, CancellationToken cancellationToken = default)
     {
         if (sessions.Count < 2)
         {
-            throw new InvalidOperationException("Select at least two opened Chrome windows.");
+            throw new InvalidOperationException("Select at least two opened Chrome or Firefox sync windows.");
         }
 
         Stop();
@@ -75,26 +79,26 @@ internal sealed class ChromeSyncController : IDisposable
             .ToList();
         if (ordered.Count < 2)
         {
-            throw new InvalidOperationException("Chrome sync requires at least two opened Chrome windows.");
+            throw new InvalidOperationException("Sync requires at least two opened Chrome or Firefox sync windows.");
         }
 
         var createdTabs = new List<SyncedChromeTab>();
         try
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(12, ordered.Count * 8)));
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
-            progress?.Invoke($"Chrome sync connecting {ordered.Count} DevTools targets...");
+            progress?.Invoke($"Sync connecting {ordered.Count} browser windows...");
             for (var index = 0; index < ordered.Count; index++)
             {
                 var session = ordered[index];
-                var client = await ChromeDevToolsClient.ConnectAsync(session.DebuggingPort, linked.Token);
+                var client = await BrowserSyncClient.ConnectAsync(session.Provider, session.DebuggingPort, linked.Token);
+                var tab = new SyncedChromeTab(session, client, isMaster: index == 0);
+                createdTabs.Add(tab);
                 await client.SendAsync("Page.enable", cancellationToken: linked.Token);
                 await client.SendAsync("Runtime.enable", cancellationToken: linked.Token);
-                var tab = new SyncedChromeTab(session, client, isMaster: index == 0);
                 await InstallPageSyncBridgeAsync(tab, linked.Token);
                 await InstallSyncRoleBadgeAsync(tab, linked.Token);
                 await RefreshMetricsAsync(tab, linked.Token);
-                createdTabs.Add(tab);
             }
         }
         catch
@@ -108,6 +112,9 @@ internal sealed class ChromeSyncController : IDisposable
         }
 
         var stop = new CancellationTokenSource();
+        while (_events.Reader.TryRead(out _)) { }
+        foreach (var tab in createdTabs.Where(tab => !tab.IsMaster))
+            tab.Queue = new WindowActionQueue(stop.Token, error => progress?.Invoke($"Sync row {tab.Session.RowNumber}: {error}"));
         lock (_gate)
         {
             _tabs.Clear();
@@ -136,7 +143,7 @@ internal sealed class ChromeSyncController : IDisposable
         await RefreshAllMetricsAsync(stop.Token);
         InstallHooks();
         var master = _tabs.First(tab => tab.IsMaster);
-        progress?.Invoke($"Chrome sync started: master row {master.Session.RowNumber}, {_tabs.Count - 1} followers.");
+        progress?.Invoke($"Sync started: master row {master.Session.RowNumber}, {_tabs.Count - 1} followers.");
     }
 
     public void Stop()
@@ -214,7 +221,7 @@ internal sealed class ChromeSyncController : IDisposable
             .ToList();
         if (active.Count < 2)
         {
-            throw new InvalidOperationException("Select at least two opened Chrome windows to align.");
+            throw new InvalidOperationException("Select at least two opened Chrome or Firefox sync windows to align.");
         }
 
         var placements = CalculateWindowPlacements(active.Count, monitor);
@@ -275,7 +282,7 @@ internal sealed class ChromeSyncController : IDisposable
 
         if (tabs.Count == 0)
         {
-            throw new InvalidOperationException("Chrome sync is not connected to any open window.");
+            throw new InvalidOperationException("Sync is not connected to any open window.");
         }
 
         try
@@ -346,11 +353,11 @@ internal sealed class ChromeSyncController : IDisposable
             }, cancellationToken);
             if (TryGetRuntimeValue(result, out var value))
             {
-                tab.ViewportWidth = TryGetDouble(value, "width", tab.ViewportWidth);
-                tab.ViewportHeight = TryGetDouble(value, "height", tab.ViewportHeight);
+                tab.ViewportWidth = Math.Max(1, TryGetDouble(value, "width", tab.ViewportWidth));
+                tab.ViewportHeight = Math.Max(1, TryGetDouble(value, "height", tab.ViewportHeight));
                 tab.OuterWidth = TryGetDouble(value, "outerWidth", tab.OuterWidth);
                 tab.OuterHeight = TryGetDouble(value, "outerHeight", tab.OuterHeight);
-                tab.DeviceScaleFactor = TryGetDouble(value, "dpr", tab.DeviceScaleFactor);
+                tab.DeviceScaleFactor = Math.Max(0.1, TryGetDouble(value, "dpr", tab.DeviceScaleFactor));
                 tab.ScrollX = TryGetDouble(value, "scrollX", tab.ScrollX);
                 tab.ScrollY = TryGetDouble(value, "scrollY", tab.ScrollY);
                 tab.ScrollWidth = TryGetDouble(value, "scrollWidth", tab.ScrollWidth);
@@ -367,7 +374,7 @@ internal sealed class ChromeSyncController : IDisposable
 
     private static bool IsSupportedSyncProvider(string? provider)
     {
-        return provider?.Trim().ToLowerInvariant() is "chrome";
+        return provider?.Trim().ToLowerInvariant() is "chrome" or "firefox";
     }
 
     private static async Task RefreshWindowBoundsFromDevToolsAsync(SyncedChromeTab tab, CancellationToken cancellationToken)
@@ -513,246 +520,72 @@ internal sealed class ChromeSyncController : IDisposable
         {
             await foreach (var syncEvent in _events.Reader.ReadAllAsync(cancellationToken))
             {
+                SyncedChromeTab? master;
+                List<SyncedChromeTab> followers;
+                lock (_gate)
+                {
+                    master = _tabs.FirstOrDefault(tab => tab.IsMaster);
+                    followers = _tabs.Where(tab => !tab.IsMaster).ToList();
+                }
+                if (master is null) continue;
+                var sourceId = syncEvent is ChromeSyncMouseEvent m ? m.SourceStableId : ((ChromeSyncKeyEvent)syncEvent).SourceStableId;
+                if (sourceId != master.Session.StableId) continue;
                 if (syncEvent is ChromeSyncMouseEvent mouse)
                 {
-                    await ReplayMouseAsync(mouse, cancellationToken);
+                    if (mouse.Type == "mouseWheel") { QueueScrollCorrection(sourceId); continue; }
+                    var delayed = IsDelayedCtrlClick(mouse);
+                    if (delayed && mouse.Type == "mousePressed") continue;
+                    var delayMs = Volatile.Read(ref _ctrlClickDelayMs);
+                    for (var index = 0; index < followers.Count; index++)
+                    {
+                        var follower = followers[index];
+                        var delay = delayed ? TimeSpan.FromMilliseconds(delayMs * (index + 1)) : TimeSpan.Zero;
+                        follower.Queue?.Enqueue(ct => ReplayFollowerMouseAsync(follower, mouse, delayed, ct),
+                            mouse.Type == "mouseMoved" ? "move" : null, delay);
+                    }
                 }
                 else if (syncEvent is ChromeSyncKeyEvent key)
                 {
-                    await ReplayKeyAsync(key, cancellationToken);
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-        }
-    }
-
-    private async Task ReplayMouseAsync(ChromeSyncMouseEvent syncEvent, CancellationToken cancellationToken)
-    {
-        SyncedChromeTab? source;
-        List<SyncedChromeTab> followers;
-        lock (_gate)
-        {
-            source = _tabs.FirstOrDefault(tab => tab.IsMaster && string.Equals(tab.Session.StableId, syncEvent.SourceStableId, StringComparison.Ordinal));
-            followers = _tabs
-                .Where(tab => !tab.IsMaster)
-                .ToList();
-        }
-
-        if (source is null)
-        {
-            return;
-        }
-
-        if (syncEvent.Type == "mouseWheel")
-        {
-            await RefreshMetricsAsync(source, cancellationToken);
-        }
-        else
-        {
-            await RefreshMetricsAsync(source, cancellationToken);
-        }
-
-        Interlocked.Increment(ref _inputReplayDepth);
-        try
-        {
-            if (IsDelayedCtrlClick(syncEvent))
-            {
-                if (syncEvent.Type == "mouseReleased")
-                {
-                    await ReplayDelayedClickAsync(syncEvent, followers, cancellationToken);
-                }
-
-                return;
-            }
-
-            if (source is not null && syncEvent.Type == "mouseWheel")
-            {
-                QueueScrollCorrection(source.Session.StableId);
-                return;
-            }
-
-            foreach (var follower in followers)
-            {
-                try
-                {
-                    if (follower.ViewportWidth <= 0 || follower.ViewportHeight <= 0 || syncEvent.Type != "mouseMoved")
-                    {
-                        await RefreshMetricsAsync(follower, cancellationToken);
-                    }
-
-                    var x = Math.Clamp(syncEvent.XRatio * follower.ViewportWidth, 1, Math.Max(1, follower.ViewportWidth - 1));
-                    var y = Math.Clamp(syncEvent.YRatio * follower.ViewportHeight, 1, Math.Max(1, follower.ViewportHeight - 1));
-                    object parameters = syncEvent.Type == "mouseWheel"
-                        ? new
+                    foreach (var follower in followers)
+                        follower.Queue?.Enqueue(ct => follower.Client.SendAsync("Input.dispatchKeyEvent", new
                         {
-                            type = syncEvent.Type,
-                            x,
-                            y,
-                            deltaX = syncEvent.WheelDeltaX,
-                            deltaY = syncEvent.WheelDeltaY,
-                            modifiers = syncEvent.Modifiers
-                        }
-                        : new
-                        {
-                            type = syncEvent.Type,
-                            x,
-                            y,
-                            button = syncEvent.Button,
-                            buttons = syncEvent.Buttons,
-                            clickCount = syncEvent.ClickCount,
-                            modifiers = syncEvent.Modifiers,
-                            pointerType = "mouse"
-                        };
-
-                    await follower.Client.SendAsync("Input.dispatchMouseEvent", parameters, cancellationToken);
-                }
-                catch
-                {
+                            type = key.Type, key = key.Key, code = key.Code, windowsVirtualKeyCode = key.VirtualKey,
+                            nativeVirtualKeyCode = key.VirtualKey, text = key.Text, unmodifiedText = key.Text,
+                            autoRepeat = key.AutoRepeat, isKeypad = false, modifiers = key.Modifiers
+                        }, ct));
+                    if (key.Type == "keyUp" && IsScrollKey(key.VirtualKey)) QueueScrollCorrection(sourceId);
                 }
             }
-
-            if (source is not null && syncEvent.Type == "mouseWheel")
-            {
-                QueueScrollCorrection(source.Session.StableId);
-            }
         }
-        finally
-        {
-            Interlocked.Decrement(ref _inputReplayDepth);
-        }
+        catch (OperationCanceledException) { }
     }
 
-    private async Task ReplayDelayedClickAsync(ChromeSyncMouseEvent syncEvent, IReadOnlyList<SyncedChromeTab> followers, CancellationToken cancellationToken)
+    private static async Task ReplayFollowerMouseAsync(SyncedChromeTab follower, ChromeSyncMouseEvent mouse,
+        bool delayed, CancellationToken token)
     {
-        var delayMs = Interlocked.CompareExchange(ref _ctrlClickDelayMs, 0, 0);
-        if (delayMs <= 0)
+        if (mouse.Type != "mouseMoved") await RefreshMetricsAsync(follower, token);
+        var x = Math.Clamp(mouse.XRatio * follower.ViewportWidth, 1, Math.Max(1, follower.ViewportWidth - 1));
+        var y = Math.Clamp(mouse.YRatio * follower.ViewportHeight, 1, Math.Max(1, follower.ViewportHeight - 1));
+        var modifiers = delayed ? mouse.Modifiers & ~CdpModifierControl : mouse.Modifiers;
+        if (delayed)
         {
-            return;
+            await follower.Client.SendAsync("Input.dispatchMouseEvent", new
+            {
+                type = "mousePressed", x, y, button = mouse.Button, buttons = ButtonMask(mouse.Button),
+                clickCount = Math.Max(1, mouse.ClickCount), modifiers, pointerType = "mouse"
+            }, token);
+            await Task.Delay(35, token);
         }
-
-        var button = syncEvent.Button is "left" or "right" or "middle" ? syncEvent.Button : "left";
-        var buttonMask = ButtonMask(button);
-        var modifiers = syncEvent.Modifiers & ~CdpModifierControl;
-        var clickCount = Math.Max(1, syncEvent.ClickCount);
-        for (var index = 0; index < followers.Count; index++)
+        await follower.Client.SendAsync("Input.dispatchMouseEvent", new
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            await Task.Delay(delayMs, cancellationToken);
-
-            var follower = followers[index];
-            try
-            {
-                await RefreshMetricsAsync(follower, cancellationToken);
-                var x = Math.Clamp(syncEvent.XRatio * follower.ViewportWidth, 1, Math.Max(1, follower.ViewportWidth - 1));
-                var y = Math.Clamp(syncEvent.YRatio * follower.ViewportHeight, 1, Math.Max(1, follower.ViewportHeight - 1));
-                await follower.Client.SendAsync("Input.dispatchMouseEvent", new
-                {
-                    type = "mouseMoved",
-                    x,
-                    y,
-                    button = "none",
-                    buttons = 0,
-                    modifiers,
-                    pointerType = "mouse"
-                }, cancellationToken);
-                await follower.Client.SendAsync("Input.dispatchMouseEvent", new
-                {
-                    type = "mousePressed",
-                    x,
-                    y,
-                    button,
-                    buttons = buttonMask,
-                    clickCount,
-                    modifiers,
-                    pointerType = "mouse"
-                }, cancellationToken);
-                await Task.Delay(35, cancellationToken);
-                await follower.Client.SendAsync("Input.dispatchMouseEvent", new
-                {
-                    type = "mouseReleased",
-                    x,
-                    y,
-                    button,
-                    buttons = 0,
-                    clickCount,
-                    modifiers,
-                    pointerType = "mouse"
-                }, cancellationToken);
-            }
-            catch
-            {
-            }
-        }
+            type = mouse.Type, x, y, button = mouse.Button, buttons = mouse.Buttons,
+            clickCount = mouse.ClickCount, modifiers, pointerType = "mouse"
+        }, token);
     }
 
-    private bool IsDelayedCtrlClick(ChromeSyncMouseEvent syncEvent)
-    {
-        return Interlocked.CompareExchange(ref _ctrlClickDelayMs, 0, 0) > 0
-            && (syncEvent.Modifiers & CdpModifierControl) != 0
-            && syncEvent.Type is "mousePressed" or "mouseReleased"
-            && syncEvent.Button is "left" or "right" or "middle";
-    }
-
-    private async Task ReplayKeyAsync(ChromeSyncKeyEvent syncEvent, CancellationToken cancellationToken)
-    {
-        SyncedChromeTab? source;
-        List<SyncedChromeTab> followers;
-        lock (_gate)
-        {
-            source = _tabs.FirstOrDefault(tab => tab.IsMaster && string.Equals(tab.Session.StableId, syncEvent.SourceStableId, StringComparison.Ordinal));
-            followers = _tabs
-                .Where(tab => !tab.IsMaster)
-                .ToList();
-        }
-
-        if (source is null)
-        {
-            return;
-        }
-
-        if (source is not null)
-        {
-            await RefreshMetricsAsync(source, cancellationToken);
-        }
-
-        Interlocked.Increment(ref _inputReplayDepth);
-        try
-        {
-            foreach (var follower in followers)
-            {
-                try
-                {
-                    await follower.Client.SendAsync("Input.dispatchKeyEvent", new
-                    {
-                        type = syncEvent.Type,
-                        key = syncEvent.Key,
-                        code = syncEvent.Code,
-                        windowsVirtualKeyCode = syncEvent.VirtualKey,
-                        nativeVirtualKeyCode = syncEvent.VirtualKey,
-                        text = syncEvent.Text,
-                        unmodifiedText = syncEvent.Text,
-                        autoRepeat = syncEvent.AutoRepeat,
-                        isKeypad = false,
-                        modifiers = syncEvent.Modifiers
-                    }, cancellationToken);
-                }
-                catch
-                {
-                }
-            }
-
-            if (source is not null && syncEvent.Type == "keyUp" && IsScrollKey(syncEvent.VirtualKey))
-            {
-                QueueScrollCorrection(source.Session.StableId);
-            }
-        }
-        finally
-        {
-            Interlocked.Decrement(ref _inputReplayDepth);
-        }
-    }
+    private bool IsDelayedCtrlClick(ChromeSyncMouseEvent syncEvent) =>
+        Volatile.Read(ref _ctrlClickDelayMs) > 0 && (syncEvent.Modifiers & CdpModifierControl) != 0
+        && syncEvent.Type is "mousePressed" or "mouseReleased" && syncEvent.Button is "left" or "right" or "middle";
 
     private static async Task ApplyScrollAsync(SyncedChromeTab follower, double scrollX, double scrollY, int durationMs, CancellationToken cancellationToken)
     {
@@ -886,19 +719,20 @@ internal sealed class ChromeSyncController : IDisposable
             ratioY = 0;
         }
 
+        var sourceX = source.ScrollX;
+        var sourceY = source.ScrollY;
+        var sourceWidth = source.ViewportWidth;
         foreach (var follower in followers)
-        {
-            try
+            follower.Queue?.Enqueue(async token =>
             {
-                await RefreshMetricsAsync(follower, timeout.Token);
-                var targetX = ratioX <= 0 ? 0 : ratioX * Math.Max(1, follower.ScrollWidth - follower.ViewportWidth);
-                var targetY = ratioY <= 0 ? 0 : ratioY * Math.Max(1, follower.ScrollHeight - follower.ViewportHeight);
-                await ApplyScrollAsync(follower, targetX, targetY, ScrollAnimationMs, timeout.Token);
-            }
-            catch
-            {
-            }
-        }
+                await RefreshMetricsAsync(follower, token);
+                var sameWidth = Math.Abs(sourceWidth - follower.ViewportWidth) < 2;
+                var maxX = Math.Max(0, follower.ScrollWidth - follower.ViewportWidth);
+                var maxY = Math.Max(0, follower.ScrollHeight - follower.ViewportHeight);
+                var targetX = ratioX <= 0 ? 0 : sameWidth ? Math.Clamp(sourceX, 0, maxX) : ratioX * maxX;
+                var targetY = ratioY <= 0 ? 0 : sameWidth ? Math.Clamp(sourceY, 0, maxY) : ratioY * maxY;
+                await ApplyScrollAsync(follower, targetX, targetY, ScrollAnimationMs, token);
+            }, "scroll");
     }
 
     private async void OnDevToolsEvent(SyncedChromeTab source, string method, JsonElement payload)
@@ -983,11 +817,6 @@ internal sealed class ChromeSyncController : IDisposable
             return;
         }
 
-        if (Interlocked.CompareExchange(ref _inputReplayDepth, 0, 0) > 0)
-        {
-            return;
-        }
-
         try
         {
             if (!payload.TryGetProperty("params", out var parameters)
@@ -1052,8 +881,8 @@ internal sealed class ChromeSyncController : IDisposable
 
     private static void UpdateSourceStateFromBridge(SyncedChromeTab source, JsonElement root)
     {
-        source.ViewportWidth = TryGetDouble(root, "viewportWidth", source.ViewportWidth);
-        source.ViewportHeight = TryGetDouble(root, "viewportHeight", source.ViewportHeight);
+        source.ViewportWidth = Math.Max(1, TryGetDouble(root, "viewportWidth", source.ViewportWidth));
+        source.ViewportHeight = Math.Max(1, TryGetDouble(root, "viewportHeight", source.ViewportHeight));
         source.ScrollX = TryGetDouble(root, "scrollX", source.ScrollX);
         source.ScrollY = TryGetDouble(root, "scrollY", source.ScrollY);
         source.ScrollWidth = TryGetDouble(root, "scrollWidth", source.ScrollWidth);
@@ -1403,9 +1232,11 @@ internal sealed class ChromeSyncController : IDisposable
         return false;
     }
 
-    private static double TryGetDouble(JsonElement element, string propertyName, double fallback)
+    internal static double TryGetDouble(JsonElement element, string propertyName, double fallback)
     {
-        return element.TryGetProperty(propertyName, out var property) && property.TryGetDouble(out var value) && value > 0
+        return element.TryGetProperty(propertyName, out var property)
+            && property.ValueKind == JsonValueKind.Number
+            && property.TryGetDouble(out var value) && double.IsFinite(value)
             ? value
             : fallback;
     }
@@ -1731,10 +1562,11 @@ internal sealed class ChromeSyncController : IDisposable
         int Modifiers,
         bool AutoRepeat) : ChromeSyncEvent(Sequence);
 
-    private sealed class SyncedChromeTab(SystemBrowserSyncSession session, ChromeDevToolsClient client, bool isMaster) : IDisposable
+    private sealed class SyncedChromeTab(SystemBrowserSyncSession session, IBrowserSyncClient client, bool isMaster) : IDisposable
     {
         public SystemBrowserSyncSession Session { get; } = session;
-        public ChromeDevToolsClient Client { get; } = client;
+        public IBrowserSyncClient Client { get; } = client;
+        public WindowActionQueue? Queue { get; set; }
         public bool IsMaster { get; } = isMaster;
         public IntPtr MainWindow { get; set; }
         public Rect WindowRect { get; set; } = Rect.Empty;
@@ -1753,6 +1585,7 @@ internal sealed class ChromeSyncController : IDisposable
 
         public void Dispose()
         {
+            Queue?.Dispose();
             Client.Dispose();
         }
     }

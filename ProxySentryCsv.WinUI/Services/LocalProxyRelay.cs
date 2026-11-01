@@ -1,331 +1,355 @@
 ﻿using System.Net;
+using System.Collections.Concurrent;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Text;
+using MailKit.Net.Proxy;
 using ProxySentryCsv.Models;
 
 namespace ProxySentryCsv.Services;
 
+public enum ProxyRouteMode { Proxy, Direct }
+
+public sealed record RelaySnapshot(ProxyRouteMode Route, int Connections, long UploadedBytes,
+    long DownloadedBytes, long Failures, string LastError);
+
 public sealed class LocalProxyRelay : IDisposable
 {
     private const int HeaderLimitBytes = 64 * 1024;
-    private readonly string _upstreamScheme;
-    private readonly string _upstreamHost;
-    private readonly int _upstreamPort;
-    private readonly string _username;
-    private readonly string _password;
+    private readonly string _scheme;
+    private readonly string _host;
+    private readonly int _port;
+    private readonly NetworkCredential _credentials;
     private readonly Action<string>? _progress;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stop = new();
+    private readonly ConcurrentDictionary<long, TcpClient> _clients = new();
+    private readonly object _routeGate = new();
+    private CancellationTokenSource _routeStop = new();
     private readonly Task _acceptLoop;
+    private ProxyRouteMode _route;
     private bool _disposed;
+    private long _nextClient;
+    private long _uploaded;
+    private long _downloaded;
+    private long _failures;
+    private string _lastError = "";
 
     private LocalProxyRelay(ProxyEntry proxy, Action<string>? progress)
     {
-        _upstreamScheme = proxy.Scheme.Trim().ToLowerInvariant();
-        _upstreamHost = proxy.Host;
-        _upstreamPort = proxy.Port;
-        _username = proxy.Username;
-        _password = proxy.Password;
+        _scheme = proxy.Scheme.Trim().ToLowerInvariant();
+        _host = proxy.Host;
+        _port = proxy.Port;
+        _credentials = new NetworkCredential(proxy.Username, proxy.Password);
         _progress = progress;
         _listener = new TcpListener(IPAddress.Loopback, 0);
         _listener.Start(128);
         Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-        _acceptLoop = Task.Run(AcceptLoopAsync);
+        _acceptLoop = AcceptLoopAsync();
     }
 
     public int Port { get; }
+    public ProxyRouteMode Route { get { lock (_routeGate) return _route; } }
+    public RelaySnapshot Snapshot => new(Route, _clients.Count, Interlocked.Read(ref _uploaded),
+        Interlocked.Read(ref _downloaded), Interlocked.Read(ref _failures), _lastError);
 
     public static LocalProxyRelay Start(ProxyEntry proxy, Action<string>? progress = null)
     {
-        if (proxy.Scheme.StartsWith("socks", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException("System browser proxy relay currently supports HTTP/HTTPS proxy endpoints. SOCKS proxies need direct browser support.");
-        }
-
+        if (proxy.Scheme.ToLowerInvariant() is not ("http" or "https" or "socks5"))
+            throw new NotSupportedException("Supported proxy types: HTTP, HTTPS and SOCKS5.");
+        if (string.IsNullOrWhiteSpace(proxy.Host) || proxy.Port is < 1 or > 65535)
+            throw new ArgumentException("Invalid proxy address or port.");
         return new LocalProxyRelay(proxy, progress);
+    }
+
+    public void SetRoute(ProxyRouteMode mode)
+    {
+        lock (_routeGate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_route == mode) return;
+            _route = mode;
+            // Existing tunnels must not retain the old route after a switch.
+            _routeStop.Cancel();
+            foreach (var client in _clients.Values) client.Dispose();
+            _routeStop.Dispose();
+            _routeStop = new CancellationTokenSource();
+        }
+        _progress?.Invoke(mode == ProxyRouteMode.Direct ? "Direct connection enabled. Real IP is exposed." : "Proxy connection restored.");
     }
 
     public void Dispose()
     {
-        if (_disposed)
+        lock (_routeGate)
         {
-            return;
-        }
-
-        _disposed = true;
-        _stop.Cancel();
-        try
-        {
+            if (_disposed) return;
+            _disposed = true;
+            _stop.Cancel();
+            _routeStop.Cancel();
             _listener.Stop();
+            foreach (var client in _clients.Values) client.Dispose();
         }
-        catch
-        {
-        }
-
-        _stop.Dispose();
+        _ = _acceptLoop.ContinueWith(_ => { _stop.Dispose(); _routeStop.Dispose(); }, TaskScheduler.Default);
     }
 
     private async Task AcceptLoopAsync()
     {
-        while (!_stop.IsCancellationRequested)
+        try
         {
-            try
+            while (!_stop.IsCancellationRequested)
             {
-                var client = await _listener.AcceptTcpClientAsync(_stop.Token);
-                _ = Task.Run(() => HandleClientAsync(client, _stop.Token));
+                var client = await _listener.AcceptTcpClientAsync(_stop.Token).ConfigureAwait(false);
+                if (_clients.Count >= 256) { client.Dispose(); continue; }
+                var id = Interlocked.Increment(ref _nextClient);
+                CancellationTokenSource lifetime;
+                ProxyRouteMode route;
+                lock (_routeGate)
+                {
+                    if (_disposed) { client.Dispose(); return; }
+                    route = _route;
+                    lifetime = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token, _routeStop.Token);
+                    _clients[id] = client;
+                }
+                _ = HandleClientAsync(id, client, route, lifetime);
             }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch (ObjectDisposedException)
-            {
-                return;
-            }
-            catch
-            {
-            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException)
+        {
+            if (!_stop.IsCancellationRequested) RecordFailure(ex);
         }
     }
 
-    private async Task HandleClientAsync(TcpClient client, CancellationToken token)
+    private async Task HandleClientAsync(long id, TcpClient client, ProxyRouteMode route, CancellationTokenSource lifetime)
     {
         using (client)
+        using (lifetime)
         {
-            TcpClient? upstream = null;
+            var token = lifetime.Token;
+            var responseStarted = false;
             try
             {
                 client.NoDelay = true;
-                var clientStream = client.GetStream();
-                var header = await ReadHeaderAsync(clientStream, token);
-                if (header.HeaderLength == 0)
+                var downstream = client.GetStream();
+                using var handshake = CancellationTokenSource.CreateLinkedTokenSource(token);
+                handshake.CancelAfter(TimeSpan.FromSeconds(20));
+                var header = await ReadHeaderAsync(downstream, handshake.Token).ConfigureAwait(false);
+                var request = ParseRequest(header.Text);
+                await using var upstream = await ConnectAsync(request.Host, request.Port, route, handshake.Token).ConfigureAwait(false);
+                var throughHttpProxy = route == ProxyRouteMode.Proxy && _scheme != "socks5";
+                if (request.IsConnect && !throughHttpProxy)
                 {
-                    return;
+                    await downstream.WriteAsync("HTTP/1.1 200 Connection Established\r\n\r\n"u8.ToArray(), token).ConfigureAwait(false);
+                    responseStarted = true;
+                }
+                else
+                {
+                    var rewritten = RewriteHeader(header.Text, request, throughHttpProxy);
+                    await upstream.WriteAsync(Encoding.Latin1.GetBytes(rewritten), handshake.Token).ConfigureAwait(false);
+                }
+                if (header.Extra.Length > 0)
+                    await upstream.WriteAsync(header.Extra, handshake.Token).ConfigureAwait(false);
+
+                if (request.IsConnect && throughHttpProxy)
+                {
+                    var response = await ReadHeaderAsync(upstream, handshake.Token).ConfigureAwait(false);
+                    var status = GetStatus(response.Text);
+                    if (status == 407) throw new ProxyAuthenticationException();
+                    await downstream.WriteAsync(Encoding.Latin1.GetBytes(response.Text), token).ConfigureAwait(false);
+                    if (response.Extra.Length > 0) await downstream.WriteAsync(response.Extra, token).ConfigureAwait(false);
+                    responseStarted = true;
+                    if (status is < 200 or > 299) return;
                 }
 
-                upstream = new TcpClient { NoDelay = true };
-                await upstream.ConnectAsync(_upstreamHost, _upstreamPort, token);
-                await using var upstreamStream = upstream.GetStream();
-
-                var headerText = Encoding.ASCII.GetString(header.Buffer, 0, header.HeaderLength);
-                var rewrittenHeader = RewriteHeader(headerText);
-                await upstreamStream.WriteAsync(Encoding.ASCII.GetBytes(rewrittenHeader), token);
-
-                var extraLength = header.BytesRead - header.HeaderLength;
-                if (extraLength > 0)
+                // The site TLS stream remains opaque; only proxy handshakes are interpreted.
+                using var pumping = CancellationTokenSource.CreateLinkedTokenSource(token);
+                var upload = PumpAsync(downstream, upstream, true, pumping.Token);
+                var download = request.IsConnect
+                    ? PumpAsync(upstream, downstream, false, pumping.Token)
+                    : PumpHttpResponseAsync(upstream, downstream, () => responseStarted = true, pumping.Token);
+                try
                 {
-                    await upstreamStream.WriteAsync(header.Buffer.AsMemory(header.HeaderLength, extraLength), token);
+                    var completed = await Task.WhenAny(upload, download).ConfigureAwait(false);
+                    // A client can half-close after sending a POST; its response still needs to drain.
+                    if (completed == upload && !token.IsCancellationRequested)
+                        await download.WaitAsync(TimeSpan.FromSeconds(30), token).ConfigureAwait(false);
+                    else
+                        await download.ConfigureAwait(false);
                 }
-
-                if (ShouldInspectUpstreamResponse(headerText))
+                finally
                 {
-                    var responseHeader = await ReadHeaderAsync(upstreamStream, token);
-                    if (responseHeader.HeaderLength == 0)
-                    {
-                        return;
-                    }
-
-                    var responseText = Encoding.ASCII.GetString(responseHeader.Buffer, 0, responseHeader.HeaderLength);
-                    if (IsProxyAuthenticationRequired(responseText))
-                    {
-                        _progress?.Invoke($"Proxy authentication failed upstream: {_upstreamHost}:{_upstreamPort}. Check username/password for this proxy.");
-                        await WriteLocalProxyErrorAsync(clientStream, "Upstream proxy authentication failed. Check proxy username/password in CSV.", token);
-                        return;
-                    }
-
-                    await clientStream.WriteAsync(responseHeader.Buffer.AsMemory(0, responseHeader.BytesRead), token);
+                    pumping.Cancel();
+                    await Task.WhenAll(upload, download).ConfigureAwait(false);
                 }
-
-                var upload = PumpAsync(clientStream, upstreamStream, token);
-                var download = PumpAsync(upstreamStream, clientStream, token);
-                await Task.WhenAny(upload, download);
             }
             catch (Exception ex)
             {
-                if (!_stop.IsCancellationRequested)
+                if (!token.IsCancellationRequested)
                 {
-                    _progress?.Invoke($"Proxy relay failed: {ex.Message}");
+                    var error = RecordFailure(ex);
+                    if (!responseStarted)
+                    {
+                        try
+                        {
+                            using var errorTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                            await WriteErrorAsync(client.GetStream(), error, errorTimeout.Token).ConfigureAwait(false);
+                        }
+                        catch { }
+                    }
                 }
             }
-            finally
-            {
-                upstream?.Dispose();
-            }
+            finally { _clients.TryRemove(id, out _); }
         }
     }
 
-    private async Task<HeaderRead> ReadHeaderAsync(NetworkStream stream, CancellationToken token)
+    private async Task<Stream> ConnectAsync(string targetHost, int targetPort, ProxyRouteMode route, CancellationToken token)
     {
-        var buffer = new byte[HeaderLimitBytes];
-        var total = 0;
-        while (total < buffer.Length)
+        if (route == ProxyRouteMode.Proxy && _scheme == "socks5")
         {
-            var read = await stream.ReadAsync(buffer.AsMemory(total, buffer.Length - total), token);
-            if (read <= 0)
-            {
-                return new HeaderRead(buffer, total, 0);
-            }
-
-            total += read;
-            var headerEnd = FindHeaderEnd(buffer, total);
-            if (headerEnd > 0)
-            {
-                return new HeaderRead(buffer, total, headerEnd);
-            }
+            var socks = string.IsNullOrEmpty(_credentials.UserName)
+                ? new Socks5Client(_host, _port)
+                : new Socks5Client(_host, _port, _credentials);
+            return await socks.ConnectAsync(targetHost, targetPort, token).ConfigureAwait(false);
         }
-
-        return new HeaderRead(buffer, total, 0);
-    }
-
-    private static int FindHeaderEnd(byte[] buffer, int length)
-    {
-        for (var index = 3; index < length; index++)
+        var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+        try
         {
-            if (buffer[index - 3] == '\r'
-                && buffer[index - 2] == '\n'
-                && buffer[index - 1] == '\r'
-                && buffer[index] == '\n')
+            await socket.ConnectAsync(route == ProxyRouteMode.Direct ? targetHost : _host,
+                route == ProxyRouteMode.Direct ? targetPort : _port, token).ConfigureAwait(false);
+            Stream stream = new NetworkStream(socket, ownsSocket: true);
+            if (route == ProxyRouteMode.Proxy && _scheme == "https")
             {
-                return index + 1;
+                var tls = new SslStream(stream, leaveInnerStreamOpen: false);
+                try
+                {
+                    await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = _host }, token).ConfigureAwait(false);
+                    stream = tls;
+                }
+                catch (Exception ex)
+                {
+                    try { tls.Dispose(); } catch { }
+                    if (ex is OperationCanceledException) throw;
+                    throw new AuthenticationException("HTTPS proxy TLS handshake failed.", ex);
+                }
             }
+            return stream;
         }
-
-        return 0;
+        catch { socket.Dispose(); throw; }
     }
 
-    private string RewriteHeader(string headerText)
+    private string RewriteHeader(string header, Request request, bool throughHttpProxy)
     {
-        var lines = headerText.Split(["\r\n"], StringSplitOptions.None);
+        var lines = header.Split("\r\n", StringSplitOptions.None);
         var builder = new StringBuilder();
-        if (lines.Length == 0 || string.IsNullOrWhiteSpace(lines[0]))
+        builder.Append(throughHttpProxy || request.IsConnect ? lines[0] : $"{request.Method} {request.Path} HTTP/1.1").Append("\r\n");
+        if (throughHttpProxy && !string.IsNullOrEmpty(_credentials.UserName))
+            builder.Append("Proxy-Authorization: Basic ").Append(Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_credentials.UserName}:{_credentials.Password}"))).Append("\r\n");
+        foreach (var line in lines.Skip(1))
         {
-            return headerText;
+            if (line.Length == 0) break;
+            if (line.StartsWith("Proxy-Authorization:", StringComparison.OrdinalIgnoreCase)
+                || line.StartsWith("Proxy-Connection:", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!request.IsConnect && !request.IsUpgrade && line.StartsWith("Connection:", StringComparison.OrdinalIgnoreCase)) continue;
+            builder.Append(line).Append("\r\n");
         }
+        // Plain HTTP requests are independent; CONNECT and WebSocket streams stay persistent.
+        if (!request.IsConnect && !request.IsUpgrade) builder.Append("Connection: close\r\n");
+        return builder.Append("\r\n").ToString();
+    }
 
-        builder.Append(lines[0]);
-        builder.Append("\r\n");
+    private static Request ParseRequest(string header)
+    {
+        var first = header.Split("\r\n", 2)[0].Split(' ', 3);
+        if (first.Length != 3) throw new IOException("Invalid HTTP request.");
+        var connect = first[0].Equals("CONNECT", StringComparison.OrdinalIgnoreCase);
+        if (!Uri.TryCreate(connect ? "http://" + first[1] : first[1], UriKind.Absolute, out var uri)
+            || uri.Scheme is not ("http" or "https" or "ws" or "wss") || uri.Port is < 1 or > 65535
+            || string.IsNullOrWhiteSpace(uri.Host) || !string.IsNullOrEmpty(uri.UserInfo))
+            throw new IOException("Invalid proxy destination.");
+        return new Request(first[0], uri.Host.Trim('[', ']'), uri.Port, uri.PathAndQuery, connect,
+            header.Contains("\r\nUpgrade:", StringComparison.OrdinalIgnoreCase));
+    }
 
-        var authHeader = BuildProxyAuthorizationHeader();
-        if (authHeader is not null)
+    private static int GetStatus(string header)
+    {
+        var parts = header.Split("\r\n", 2)[0].Split(' ', 3);
+        return parts.Length > 1 && int.TryParse(parts[1], out var status) ? status : 502;
+    }
+
+    private static async Task<HeaderRead> ReadHeaderAsync(Stream stream, CancellationToken token)
+    {
+        var bytes = new byte[HeaderLimitBytes];
+        var count = 0;
+        while (count < bytes.Length)
         {
-            builder.Append(authHeader);
-            builder.Append("\r\n");
+            var previous = count;
+            var read = await stream.ReadAsync(bytes.AsMemory(count), token).ConfigureAwait(false);
+            if (read == 0) throw new IOException("Connection closed before HTTP headers were received.");
+            count += read;
+            for (var i = Math.Max(3, previous); i < count; i++)
+                if (bytes[i - 3] == 13 && bytes[i - 2] == 10 && bytes[i - 1] == 13 && bytes[i] == 10)
+                    return new HeaderRead(Encoding.Latin1.GetString(bytes, 0, i + 1), bytes.AsMemory(i + 1, count - i - 1));
         }
+        throw new IOException("HTTP header exceeds 64 KB.");
+    }
 
-        for (var index = 1; index < lines.Length; index++)
+    private async Task PumpHttpResponseAsync(Stream source, Stream destination, Action started, CancellationToken token)
+    {
+        var response = await ReadHeaderAsync(source, token).ConfigureAwait(false);
+        if (GetStatus(response.Text) == 407)
         {
-            var line = lines[index];
-            if (string.IsNullOrEmpty(line))
-            {
-                break;
-            }
-
-            if (line.StartsWith("Proxy-Authorization:", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            builder.Append(line);
-            builder.Append("\r\n");
+            started();
+            await WriteErrorAsync(destination, RecordFailure(new ProxyAuthenticationException()), token).ConfigureAwait(false);
+            return;
         }
-
-        builder.Append("\r\n");
-        return builder.ToString();
+        started();
+        await destination.WriteAsync(Encoding.Latin1.GetBytes(response.Text), token).ConfigureAwait(false);
+        if (response.Extra.Length > 0) await destination.WriteAsync(response.Extra, token).ConfigureAwait(false);
+        await PumpAsync(source, destination, false, token).ConfigureAwait(false);
     }
 
-    private static bool IsConnectRequest(string headerText)
+    private async Task PumpAsync(Stream source, Stream destination, bool upload, CancellationToken token)
     {
-        return headerText.StartsWith("CONNECT ", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool ShouldInspectUpstreamResponse(string headerText)
-    {
-        return IsConnectRequest(headerText) || !HasRequestBody(headerText);
-    }
-
-    private static bool HasRequestBody(string headerText)
-    {
-        foreach (var line in headerText.Split(["\r\n"], StringSplitOptions.None))
+        var bytes = new byte[32768];
+        try
         {
-            if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)
-                && long.TryParse(line["Content-Length:".Length..].Trim(), out var contentLength)
-                && contentLength > 0)
+            while (true)
             {
-                return true;
-            }
-
-            if (line.StartsWith("Transfer-Encoding:", StringComparison.OrdinalIgnoreCase)
-                && !line.Contains("identity", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
+                var read = await source.ReadAsync(bytes, token).ConfigureAwait(false);
+                if (read == 0) return;
+                await destination.WriteAsync(bytes.AsMemory(0, read), token).ConfigureAwait(false);
+                if (upload) Interlocked.Add(ref _uploaded, read); else Interlocked.Add(ref _downloaded, read);
             }
         }
-
-        return false;
+        catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException) { }
     }
 
-    private static bool IsProxyAuthenticationRequired(string headerText)
+    private string RecordFailure(Exception ex)
     {
-        var firstLineEnd = headerText.IndexOf("\r\n", StringComparison.Ordinal);
-        var firstLine = firstLineEnd >= 0 ? headerText[..firstLineEnd] : headerText;
-        return firstLine.Contains(" 407 ", StringComparison.Ordinal)
-            || firstLine.EndsWith(" 407", StringComparison.Ordinal)
-            || firstLine.Contains("407 Proxy Authentication", StringComparison.OrdinalIgnoreCase);
+        var error = ex switch
+        {
+            AuthenticationException => "TLS handshake or certificate validation failed for the HTTPS proxy.",
+            OperationCanceledException or TimeoutException => "Proxy connection timed out.",
+            ProxyProtocolException => "SOCKS5 proxy rejected the connection or credentials.",
+            ProxyAuthenticationException => "Proxy authentication failed (407). Check username and password.",
+            SocketException => "Cannot connect to the proxy or destination server.",
+            _ => "Proxy connection was interrupted or returned an invalid response."
+        };
+        _lastError = error;
+        Interlocked.Increment(ref _failures);
+        _progress?.Invoke(error);
+        return error;
     }
 
-    private static async Task WriteLocalProxyErrorAsync(NetworkStream stream, string message, CancellationToken token)
+    private static async Task WriteErrorAsync(Stream stream, string message, CancellationToken token)
     {
         var body = Encoding.UTF8.GetBytes(message);
-        var header = Encoding.ASCII.GetBytes(
-            "HTTP/1.1 502 Bad Gateway\r\n" +
-            "Content-Type: text/plain; charset=utf-8\r\n" +
-            $"Content-Length: {body.Length}\r\n" +
-            "Connection: close\r\n\r\n");
-        await stream.WriteAsync(header, token);
-        await stream.WriteAsync(body, token);
+        var header = Encoding.ASCII.GetBytes($"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n");
+        await stream.WriteAsync(header, token).ConfigureAwait(false);
+        await stream.WriteAsync(body, token).ConfigureAwait(false);
     }
 
-    private string? BuildProxyAuthorizationHeader()
-    {
-        if (string.IsNullOrWhiteSpace(_username) && string.IsNullOrWhiteSpace(_password))
-        {
-            return null;
-        }
-
-        var raw = $"{_username}:{_password}";
-        return "Proxy-Authorization: Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes(raw));
-    }
-
-    private static async Task PumpAsync(NetworkStream source, NetworkStream destination, CancellationToken token)
-    {
-        var buffer = new byte[81920];
-        while (!token.IsCancellationRequested)
-        {
-            int read;
-            try
-            {
-                read = await source.ReadAsync(buffer, token);
-            }
-            catch
-            {
-                return;
-            }
-
-            if (read <= 0)
-            {
-                return;
-            }
-
-            try
-            {
-                await destination.WriteAsync(buffer.AsMemory(0, read), token);
-            }
-            catch
-            {
-                return;
-            }
-        }
-    }
-
-    private sealed record HeaderRead(byte[] Buffer, int BytesRead, int HeaderLength);
+    private sealed record Request(string Method, string Host, int Port, string Path, bool IsConnect, bool IsUpgrade);
+    private sealed record HeaderRead(string Text, ReadOnlyMemory<byte> Extra);
+    private sealed class ProxyAuthenticationException : IOException;
 }

@@ -140,7 +140,7 @@ public static class CsvProxyLoader
             return false;
         }
 
-        if (!int.TryParse(portText, out var port))
+        if (!int.TryParse(portText, out var port) || port is < 1 or > 65535 || string.IsNullOrWhiteSpace(host))
         {
             return false;
         }

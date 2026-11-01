@@ -2,7 +2,7 @@ using ProxySentryCsv.Models;
 
 namespace ProxySentryCsv.Services;
 
-public sealed class BrowserCacheService
+public sealed partial class BrowserCacheService
 {
     private static readonly string[] SystemProviders = ["chrome", "edge", "firefox"];
 

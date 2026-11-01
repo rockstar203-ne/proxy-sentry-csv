@@ -96,6 +96,8 @@ public sealed partial class MainWindow : Window
         _eventSentryBridge.Start();
         UpdateEventSentryBridgeIndicator();
         _ = RefreshCacheSizeAsync();
+        InitializeWorkspace();
+        if (_adsPowerApiEnabled) _ = ConfigureAdsPowerApiAsync(true);
     }
 
     private async void OpenCsv_Click(object sender, RoutedEventArgs e)
@@ -120,72 +122,29 @@ public sealed partial class MainWindow : Window
 
     private async void OpenProxy_Click(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext is not ProxyEntry proxy)
-        {
-            return;
-        }
-
-        if (proxy.IsOpen)
-        {
-            try
-            {
-                await CloseProxyWindowAsync(proxy);
-                SaveState();
-                UpdateSummary();
-            }
-            catch (Exception ex)
-            {
-                proxy.Status = "Close error";
-                ShowMessage(ex.Message, InfoBarSeverity.Error);
-            }
-
-            return;
-        }
-
-        var targetUrl = ResolveTargetUrlForBrowserAction();
-        if (targetUrl is null)
-        {
-            return;
-        }
-
-        proxy.Status = "Opening";
-
+        if ((sender as FrameworkElement)?.DataContext is not ProxyEntry proxy || proxy.IsBusy) return;
         try
         {
-            var provider = NormalizeBrowserProvider(proxy.BrowserProvider);
-            proxy.BrowserProvider = provider;
-            if (string.Equals(provider, "jancy", StringComparison.OrdinalIgnoreCase))
+            if (proxy.IsOpen)
             {
-                _jancyLauncher.ExportProfiles(GetAllLoadedProxies(), targetUrl);
-                await _jancyLauncher.LaunchAsync(proxy, targetUrl, _jancyEndpointUrl);
-                proxy.OpenedProvider = "jancy";
+                proxy.IsBusy = true;
+                await CloseProxyWindowAsync(proxy);
             }
             else
             {
-                await _systemBrowserLauncher.LaunchAsync(proxy, targetUrl, provider, status =>
-                {
-                    DispatcherQueue.TryEnqueue(() =>
-                    {
-                        proxy.Status = status;
-                        ShowMessage(status, InfoBarSeverity.Informational);
-                    });
-                });
-                proxy.OpenedProvider = provider;
+                var target = ResolveTargetUrlForBrowserAction();
+                if (target is null) return;
+                await OpenWorkspaceProfileAsync(proxy, target);
             }
-
-            proxy.Used = true;
-            proxy.IsOpen = true;
-            proxy.Status = provider == "jancy" ? "Jancy opened" : $"{GetBrowserDisplayName(provider)} opened";
             SaveState();
             UpdateSummary();
         }
         catch (Exception ex)
         {
-            proxy.IsOpen = false;
-            proxy.OpenedProvider = "";
             proxy.Status = "Error";
             ShowMessage(ex.Message, InfoBarSeverity.Error);
         }
+        finally { proxy.IsBusy = false; RefreshProfileInspector(); }
     }
 
     private async Task CloseProxyWindowAsync(ProxyEntry proxy)
@@ -203,6 +162,7 @@ public sealed partial class MainWindow : Window
         proxy.IsOpen = false;
         proxy.OpenedProvider = "";
         proxy.Status = "Closed";
+        proxy.IsDirect = false;
         ClearClosedProxySelection(proxy);
     }
 
@@ -336,6 +296,11 @@ public sealed partial class MainWindow : Window
             }
             else if (IsChromiumSyncProvider(provider))
             {
+                if (selected.Any(proxy => proxy.IsOpen && !_systemBrowserLauncher.CanSynchronizeWindow(proxy)))
+                {
+                    ShowMessage("Close Firefox windows opened individually, then use Open sync group to enable Firefox synchronization. Existing tabs will not be closed automatically.", InfoBarSeverity.Warning);
+                    return;
+                }
                 var monitor = SyncMonitorBox.SelectedItem as SyncMonitorOption;
                 IReadOnlyList<SyncWindowPlacement> placements = monitor is null
                     ? Array.Empty<SyncWindowPlacement>()
@@ -343,7 +308,7 @@ public sealed partial class MainWindow : Window
                 for (var index = 0; index < selected.Count; index++)
                 {
                     var proxy = selected[index];
-                    proxy.Status = index == 0 ? "Chrome master opening" : "Chrome follower opening";
+                    proxy.Status = GetBrowserDisplayName(provider) + (index == 0 ? " master opening" : " follower opening");
                     proxy.BrowserProvider = provider;
                     if (!proxy.IsOpen || !IsChromiumSyncProvider(proxy.OpenedProvider))
                     {
@@ -355,7 +320,7 @@ public sealed partial class MainWindow : Window
                                 proxy.Status = status;
                                 ShowMessage(status, InfoBarSeverity.Informational);
                             });
-                        }, placement);
+                        }, placement, enableSync: true);
                         proxy.OpenedProvider = provider;
                         proxy.IsOpen = true;
                     }
@@ -376,7 +341,7 @@ public sealed partial class MainWindow : Window
             }
             else
             {
-                ShowMessage("Sync is available for Chrome rows. Edge/Firefox can be opened individually.", InfoBarSeverity.Warning);
+                ShowMessage("Sync is available for Chrome, Firefox and Jancy groups. Select one browser for the group.", InfoBarSeverity.Warning);
                 return;
             }
 
@@ -420,12 +385,12 @@ public sealed partial class MainWindow : Window
                 });
                 for (var index = 0; index < chromeSelected.Count; index++)
                 {
-                    chromeSelected[index].Status = index == 0 ? "Chrome sync MASTER" : "Chrome sync follower";
+                    chromeSelected[index].Status = index == 0 ? "Sync MASTER" : "Sync follower";
                 }
 
                 _lastChromeSyncStableIds = chromeSelected.Select(proxy => proxy.StableId).ToList();
                 UpdateSyncStatusPanel();
-                ShowMessage($"Chrome sync started: master row {chromeSelected[0].RowNumber}, {chromeSelected.Count - 1} followers.", InfoBarSeverity.Success);
+                ShowMessage($"Sync started: master row {chromeSelected[0].RowNumber}, {chromeSelected.Count - 1} followers.", InfoBarSeverity.Success);
             }
             catch (Exception ex)
             {
@@ -442,7 +407,7 @@ public sealed partial class MainWindow : Window
         var selected = GetJancySyncRows();
         if (selected.Count < 2)
         {
-            ShowMessage("Select at least two opened Chrome or Jancy rows, or use Open sync group first.", InfoBarSeverity.Warning);
+            ShowMessage("Select at least two opened Chrome, Firefox or Jancy rows, or use Open sync group first.", InfoBarSeverity.Warning);
             return;
         }
 
@@ -479,7 +444,7 @@ public sealed partial class MainWindow : Window
         var chromeSelected = GetChromeSyncRows();
         if (chromeSelected.Count == 0)
         {
-            ShowMessage("Open or select Chrome windows before applying Target URL.", InfoBarSeverity.Warning);
+            ShowMessage("Open or select Chrome or Firefox sync windows before applying Target URL.", InfoBarSeverity.Warning);
             return;
         }
 
@@ -493,7 +458,7 @@ public sealed partial class MainWindow : Window
 
             for (var index = 0; index < chromeSelected.Count; index++)
             {
-                chromeSelected[index].Status = index == 0 ? "Chrome sync MASTER" : "Chrome sync follower";
+                chromeSelected[index].Status = index == 0 ? "Sync MASTER" : "Sync follower";
             }
 
             _lastChromeSyncStableIds = chromeSelected.Select(proxy => proxy.StableId).ToList();
@@ -786,6 +751,7 @@ public sealed partial class MainWindow : Window
         var listMode = _useTargetUrlList;
         var listVisibility = listMode ? Visibility.Visible : Visibility.Collapsed;
         TargetUrlContainerBorder.Padding = listMode ? new Thickness(12) : new Thickness(8);
+        SearchHost.Padding = new Thickness(0, listMode ? 12 : 8, 0, 0);
         TargetUrlBox.IsReadOnly = listMode;
         TargetUrlListControlsPanel.Visibility = listVisibility;
         TargetUrlListBox.Visibility = listVisibility;
@@ -967,7 +933,7 @@ public sealed partial class MainWindow : Window
                 }
 
                 UpdateSyncStatusPanel();
-                ShowMessage("Chrome sync stopped. Browser windows stay open.", InfoBarSeverity.Informational);
+                ShowMessage("Sync stopped. Browser windows stay open.", InfoBarSeverity.Informational);
             }
             catch (Exception ex)
             {
@@ -1058,7 +1024,7 @@ public sealed partial class MainWindow : Window
         {
             if (selected.Count == 1)
             {
-                var lastGroup = ResolveLastOpenSyncGroup(_lastChromeSyncStableIds, "chrome");
+                var lastGroup = ResolveLastOpenSyncGroup(_lastChromeSyncStableIds, "native-sync");
                 if (lastGroup.Count >= 2 && lastGroup.Any(proxy => string.Equals(proxy.StableId, selected[0].StableId, StringComparison.Ordinal)))
                 {
                     return lastGroup;
@@ -1099,7 +1065,8 @@ public sealed partial class MainWindow : Window
 
         var activeByStableId = GetAllLoadedProxies()
             .Where(proxy => proxy.IsOpen
-                && string.Equals(GetEffectiveBrowserProvider(proxy), provider, StringComparison.OrdinalIgnoreCase))
+                && (provider == "native-sync" ? IsChromiumSyncProvider(GetEffectiveBrowserProvider(proxy))
+                    : string.Equals(GetEffectiveBrowserProvider(proxy), provider, StringComparison.OrdinalIgnoreCase)))
             .ToDictionary(proxy => proxy.StableId, StringComparer.Ordinal);
         return stableIds
             .Select(stableId => activeByStableId.TryGetValue(stableId, out var proxy) ? proxy : null)
@@ -1115,10 +1082,10 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var chromeGroup = ResolveLastOpenSyncGroup(_lastChromeSyncStableIds, "chrome");
+        var chromeGroup = ResolveLastOpenSyncGroup(_lastChromeSyncStableIds, "native-sync");
         if (IsActiveSyncGroup(chromeGroup))
         {
-            ShowSyncStatusPanel("Chrome", chromeGroup);
+            ShowSyncStatusPanel(GetBrowserDisplayName(GetEffectiveBrowserProvider(chromeGroup[0])), chromeGroup);
             return;
         }
 
@@ -1301,7 +1268,7 @@ public sealed partial class MainWindow : Window
                 }
 
                 UpdateSyncStatusPanel();
-                ShowMessage($"Aligned {chromeSelected.Count} Chrome windows.", InfoBarSeverity.Success);
+                ShowMessage($"Aligned {chromeSelected.Count} browser windows.", InfoBarSeverity.Success);
             }
             catch (Exception ex)
             {
@@ -1371,7 +1338,7 @@ Main features:
 - keep proxy state, names, used/copied/favorite marks, cookies and profile data per proxy;
 - check proxy ping and response speed;
 - export proxies to TXT and ADS-compatible formats;
-- synchronize Chrome or Jancy windows.
+- synchronize Chrome, Firefox or Jancy windows.
 
 Jancy setup:
 1. Install and open Jancy.
@@ -1564,6 +1531,7 @@ Jancy setup:
 
     private async void CheckAll_Click(object sender, RoutedEventArgs e)
     {
+        if (_checkAllCancellation is not null) return;
         if (Proxies.Count == 0)
         {
             ShowMessage("Load a proxy list before checking proxies.", InfoBarSeverity.Warning);
@@ -1605,71 +1573,82 @@ Jancy setup:
             var snapshot = Proxies.ToList();
             foreach (var proxy in snapshot)
             {
-                proxy.Status = "Queued";
+                if (!proxy.IsOpen) proxy.Status = "Queued";
             }
 
             var completed = 0;
+            var checkedCount = 0;
+            var historyFailures = 0;
+            var history = new ConnectionHistoryStore(_appDataPath);
             var targetUrl = ResolveTargetUrlForBrowserAction(showMessages: false);
             var targetUri = Uri.TryCreate(targetUrl, UriKind.Absolute, out var parsedTarget)
                 ? parsedTarget
                 : null;
-            using var semaphore = new SemaphoreSlim(12);
+            using var semaphore = new SemaphoreSlim(4);
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
             _checkAllCancellation = timeout;
 
             var tasks = snapshot.Select(async proxy =>
             {
-                await semaphore.WaitAsync(timeout.Token);
+                var entered = false;
                 try
                 {
+                    await semaphore.WaitAsync(timeout.Token);
+                    entered = true;
                     timeout.Token.ThrowIfCancellationRequested();
-                    await RunOnUiAsync(() => proxy.Status = "Checking");
+                    await RunOnUiAsync(() => { if (!proxy.IsOpen) proxy.Status = "Checking"; });
                     var result = await _proxySpeedChecker.CheckAsync(proxy, targetUri, timeout.Token);
                     await RunOnUiAsync(() =>
                     {
                         proxy.PingMs = result.PingMs;
                         proxy.ResponseMs = result.ResponseMs;
                         proxy.SpeedGroup = result.SpeedGroup;
-                        proxy.Status = result.Status;
-                        completed++;
-                        UpdateCheckProgress(completed, snapshot.Count, checkStatusText);
+                        if (!proxy.IsOpen) proxy.Status = result.Status;
+                        checkedCount++;
                     });
+                    try
+                    {
+                        await Task.Run(() => history.Add(proxy,
+                            _systemBrowserLauncher.GetInstalledVersion(proxy.BrowserProvider),
+                            targetUri ?? ProxySpeedChecker.DefaultTestUri, ProxyRouteMode.Proxy, result));
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        Interlocked.Increment(ref historyFailures);
+                    }
+                    try
+                    {
+                        var geo = await _proxyGeoService.GetAsync(proxy, cancellationToken: timeout.Token);
+                        await RunOnUiAsync(() => ApplyProxyGeo(proxy, geo));
+                    }
+                    catch (OperationCanceledException) when (timeout.IsCancellationRequested) { }
+                    catch
+                    {
+                        // Region is supplemental; preserve the completed connection result.
+                    }
                 }
                 catch (OperationCanceledException)
                 {
                     await RunOnUiAsync(() =>
                     {
-                        proxy.Status = proxy.Status == "Checking" ? "Cancelled" : proxy.Status;
-                        completed++;
-                        UpdateCheckProgress(completed, snapshot.Count, checkStatusText);
+                        if (!proxy.IsOpen && proxy.Status is "Checking" or "Queued") proxy.Status = "Cancelled";
                     });
                 }
                 catch
                 {
                     await RunOnUiAsync(() =>
                     {
-                        proxy.SpeedGroup = "Dead";
-                        proxy.Status = "Dead";
-                        completed++;
-                        UpdateCheckProgress(completed, snapshot.Count, checkStatusText);
+                        if (!proxy.IsOpen) proxy.Status = "Check failed";
                     });
-                }
-                try
-                {
-                    timeout.Token.ThrowIfCancellationRequested();
-                    var geo = await _proxyGeoService.GetAsync(proxy, cancellationToken: timeout.Token);
-                    await RunOnUiAsync(() => ApplyProxyGeo(proxy, geo));
-                }
-                catch (OperationCanceledException)
-                {
-                }
-                catch
-                {
-                    // Region is supplemental; proxy speed status should not depend on geo lookup.
                 }
                 finally
                 {
-                    semaphore.Release();
+                    if (entered) semaphore.Release();
+                    await RunOnUiAsync(() =>
+                    {
+                        completed++;
+                        UpdateCheckProgress(completed, snapshot.Count, checkStatusText);
+                    });
                 }
             });
 
@@ -1681,8 +1660,9 @@ Jancy setup:
             SaveState();
             UpdateSummary();
             ShowMessage(timeout.IsCancellationRequested
-                ? $"Proxy check cancelled. Checked {completed}/{snapshot.Count}."
-                : "Proxy check finished and grouped by speed.",
+                ? $"Proxy check cancelled. Checked {checkedCount}/{snapshot.Count}."
+                : $"Proxy check finished. Checked {checkedCount}/{snapshot.Count}." +
+                    (historyFailures > 0 ? $" History could not be saved for {historyFailures} checks." : ""),
                 timeout.IsCancellationRequested ? InfoBarSeverity.Warning : InfoBarSeverity.Success);
         }
         catch (OperationCanceledException)
@@ -1865,6 +1845,7 @@ Jancy setup:
 
             var savedStates = _stateStore.LoadProxyStates();
             var proxies = CsvProxyLoader.Load(path);
+            new ProfileIdentityStore(_appDataPath).Bind(proxies, path);
             var list = new ProxyListEntry(path, Path.GetFileName(path), path);
             foreach (var proxy in proxies)
             {
@@ -1906,6 +1887,9 @@ Jancy setup:
         }
 
         proxy.DisplayName = savedState.DisplayName;
+        proxy.Notes = savedState.Notes;
+        proxy.Tags = savedState.Tags;
+        proxy.LastUsedUtc = savedState.LastUsedUtc;
         proxy.Used = savedState.Used;
         proxy.Copied = savedState.Copied;
         proxy.IsFavorite = savedState.IsFavorite;
@@ -1946,6 +1930,7 @@ Jancy setup:
                 CsvPaths = ProxyLists.Where(list => !list.IsFavorites && !string.IsNullOrWhiteSpace(list.Path)).Select(list => list.Path!).ToList(),
                 ActiveListKey = _activeList?.Key,
                 SearchText = SearchBox.Text.Trim(),
+                ProfileFilter = (ProfileFilterBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "all",
                 TargetUrl = TargetUrlBox.Text.Trim(),
                 UseTargetUrlList = _useTargetUrlList,
                 DisableTargetUrlAutoAdvance = _disableTargetUrlAutoAdvance,
@@ -1967,6 +1952,8 @@ Jancy setup:
                 ShowChromeEmailButton = _showChromeEmailButton,
                 ShowEdgeEmailButton = _showEdgeEmailButton,
                 ShowFirefoxEmailButton = _showFirefoxEmailButton,
+                AdsPowerCompatibilityEnabled = _adsPowerApiEnabled,
+                AdsPowerApiPort = _adsPowerApiPort,
                 ProxyTableColumnWidths = CaptureProxyColumnWidths(),
                 GlobalExtensions = GlobalExtensions.ToList()
             });
@@ -1987,6 +1974,9 @@ Jancy setup:
         _showChromeEmailButton = settings.ShowChromeEmailButton;
         _showEdgeEmailButton = settings.ShowEdgeEmailButton;
         _showFirefoxEmailButton = settings.ShowFirefoxEmailButton;
+        _adsPowerApiEnabled = settings.AdsPowerCompatibilityEnabled;
+        _adsPowerApiPort = settings.AdsPowerApiPort is >= 1 and <= 65535
+            ? settings.AdsPowerApiPort : AdsPowerCompatibilityServer.DefaultPort;
         RestoreProxyColumnWidths(settings.ProxyTableColumnWidths);
         ApplyBrowserEmailButtonSettings();
         GlobalExtensions.Clear();
@@ -1998,6 +1988,7 @@ Jancy setup:
         _gitRepositoryPath = GitAutoUpdater.DetectRepositoryPath();
         _lastUpdatePreviousHead = settings.LastUpdatePreviousHead;
         SearchBox.Text = settings.SearchText;
+        ProfileFilterBox.SelectedItem = ProfileFilterBox.Items.OfType<ComboBoxItem>().FirstOrDefault(item => item.Tag?.ToString() == settings.ProfileFilter) ?? ProfileFilterBox.Items[0];
         _disableTargetUrlAutoAdvance = settings.DisableTargetUrlAutoAdvance;
         TargetUrlNoAutoNextBox.IsChecked = _disableTargetUrlAutoAdvance;
 
@@ -2110,7 +2101,7 @@ Jancy setup:
             width = fallback;
         }
 
-        return Math.Max(ProxyColumnMinWidth, width);
+        return Math.Max(index == 10 ? 242 : ProxyColumnMinWidth, width);
     }
 
     private void ProxyRowGrid_Loaded(object sender, RoutedEventArgs e)
@@ -2229,6 +2220,7 @@ Jancy setup:
         });
 
         UpdateProxyTableMinWidths(CaptureProxyColumnWidths());
+        UpdatePinnedActions();
     }
 
     private void ApplyProxyColumnWidthsToRows(IReadOnlyList<double> widths)
@@ -2344,7 +2336,7 @@ Jancy setup:
 
     private static bool IsChromiumSyncProvider(string? provider)
     {
-        return NormalizeBrowserProvider(provider) is "chrome";
+        return NormalizeBrowserProvider(provider) is "chrome" or "firefox";
     }
 
     private static string GetBrowserDisplayName(string provider)
@@ -2387,6 +2379,17 @@ Jancy setup:
         var source = _activeList?.Items ?? Enumerable.Empty<ProxyEntry>();
         var search = SearchBox.Text.Trim();
         IEnumerable<ProxyEntry> filtered = source;
+        var filter = (ProfileFilterBox.SelectedItem as ComboBoxItem)?.Tag?.ToString();
+        filtered = filter switch
+        {
+            "open" => filtered.Where(p => p.IsOpen),
+            "closed" => filtered.Where(p => !p.IsOpen),
+            "favorites" => filtered.Where(p => p.IsFavorite),
+            "new" => filtered.Where(p => !p.Used),
+            "used" => filtered.Where(p => p.Used),
+            "errors" => filtered.Where(p => p.SpeedGroup == "Dead"),
+            _ => filtered
+        };
         if (!string.IsNullOrWhiteSpace(search))
         {
             filtered = filtered.Where(proxy =>
@@ -2397,13 +2400,19 @@ Jancy setup:
         }
 
         var visible = filtered.ToList();
-        Proxies.Clear();
-        for (var index = 0; index < visible.Count; index++)
+        _syncingSelectionState = true;
+        try
         {
-            var proxy = visible[index];
-            proxy.ListNumber = index + 1;
-            Proxies.Add(proxy);
+            Proxies.Clear();
+            for (var index = 0; index < visible.Count; index++)
+            {
+                var proxy = visible[index];
+                proxy.ListNumber = index + 1;
+                Proxies.Add(proxy);
+                if (proxy.SyncSelected) ProxyList.SelectedItems.Add(proxy);
+            }
         }
+        finally { _syncingSelectionState = false; }
 
         UpdateSummary();
     }
@@ -2424,6 +2433,7 @@ Jancy setup:
 
     private void ProxyList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        RefreshProfileInspector();
         if (!_syncingSelectionState)
         {
             foreach (var proxy in e.AddedItems.OfType<ProxyEntry>())
@@ -2473,20 +2483,6 @@ Jancy setup:
 
     private void SelectForEventSentry_Click(object sender, RoutedEventArgs e)
     {
-        var current = GetAllLoadedProxies().Where(proxy => proxy.UseForEventSentry).ToList();
-        if (current.Count > 0)
-        {
-            foreach (var proxy in current)
-            {
-                proxy.UseForEventSentry = false;
-            }
-
-            SaveState();
-            UpdateSummary();
-            ShowMessage($"Event Sentry proxy selection cleared: {current.Count}.", InfoBarSeverity.Success);
-            return;
-        }
-
         var targets = GetAllLoadedProxies().Where(proxy => proxy.SyncSelected).ToList();
 
         if (targets.Count == 0)
@@ -2501,15 +2497,19 @@ Jancy setup:
         foreach (var proxy in GetAllLoadedProxies())
         {
             proxy.UseForEventSentry = selectedIds.Contains(proxy.StableId);
-            if (proxy.UseForEventSentry)
-            {
-                proxy.BrowserProvider = "chrome";
-            }
         }
 
         SaveState();
         UpdateSummary();
         ShowMessage($"Event Sentry profiles selected: {targets.Count}.", InfoBarSeverity.Success);
+    }
+
+    private void ClearEventSentrySelection_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var proxy in GetAllLoadedProxies()) proxy.UseForEventSentry = false;
+        SaveState();
+        UpdateSummary();
+        ShowMessage("Event Sentry proxy selection cleared.", InfoBarSeverity.Success);
     }
 
     private List<ProxyEntry> GetSyncSelectedProxies()
@@ -2673,6 +2673,7 @@ Jancy setup:
 
     private void UpdateSummary(string? fileName = null)
     {
+        CaptureRecoverySession();
         UpdateEventSentryBridgeIndicator();
         UpdateSelectionSummaryText();
         UpdateSyncStatusPanel();
@@ -3557,6 +3558,19 @@ Jancy setup:
 
     private async void Settings_Click(object sender, RoutedEventArgs e)
     {
+        var adsPowerBox = new CheckBox { Content = "AdsPower-compatible API", IsChecked = _adsPowerApiEnabled };
+        var adsPowerPortBox = new TextBox
+        {
+            Header = "API port", Text = _adsPowerApiPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Width = 180, HorizontalAlignment = HorizontalAlignment.Left, MaxLength = 5
+        };
+        var adsPowerPortError = new TextBlock { Text = "Enter a whole port number from 1 to 65535.", TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
+        var adsPowerStatus = new TextBlock { Text = AdsPowerApiStatus, TextWrapping = TextWrapping.Wrap };
+        var adsPowerHint = new TextBlock
+        {
+            Text = "Chrome profiles marked Select for Event Sentry appear in the Inventory Etix (DO NOT TOUCH) group. The API is local-only. Event Sentry bridge acquisition is paused while this mode is enabled. The client must use the same port. Default: 50325.",
+            TextWrapping = TextWrapping.Wrap, Opacity = 0.82
+        };
         var endpointBox = new TextBox
         {
             Header = "Jancy Web Interface",
@@ -3636,6 +3650,11 @@ Jancy setup:
         panel.Children.Add(installBridgeButton);
         panel.Children.Add(defaultBrowserBox);
         panel.Children.Add(emailButtonPanel);
+        panel.Children.Add(adsPowerBox);
+        panel.Children.Add(adsPowerPortBox);
+        panel.Children.Add(adsPowerPortError);
+        panel.Children.Add(adsPowerStatus);
+        panel.Children.Add(adsPowerHint);
 
         var scrollViewer = new ScrollViewer
         {
@@ -3657,6 +3676,14 @@ Jancy setup:
             DefaultButton = ContentDialogButton.Primary
         };
 
+        var requestedAdsPort = _adsPowerApiPort;
+        dialog.PrimaryButtonClick += (_, args) =>
+        {
+            var valid = int.TryParse(adsPowerPortBox.Text, out requestedAdsPort) && requestedAdsPort is >= 1 and <= 65535;
+            adsPowerPortError.Visibility = valid ? Visibility.Collapsed : Visibility.Visible;
+            args.Cancel = !valid;
+            if (!valid) adsPowerPortBox.Focus(FocusState.Programmatic);
+        };
         var result = await dialog.ShowAsync();
         if (result != ContentDialogResult.Primary)
         {
@@ -3671,6 +3698,7 @@ Jancy setup:
         _showChromeEmailButton = chromeEmailButtonBox.IsChecked == true;
         _showEdgeEmailButton = edgeEmailButtonBox.IsChecked == true;
         _showFirefoxEmailButton = firefoxEmailButtonBox.IsChecked == true;
+        await ConfigureAdsPowerApiAsync(adsPowerBox.IsChecked == true, requestedAdsPort);
         ApplyBrowserEmailButtonSettings();
         _gitRepositoryPath = GetConfiguredRepositoryPath();
         SaveState();
@@ -3703,13 +3731,22 @@ Jancy setup:
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
     {
+        _inspectorTimer?.Stop();
+        _diagnosticCancellation?.Cancel();
+        _checkAllCancellation?.Cancel();
+        CaptureRecoverySession();
         SaveState();
+        _workspaceReady = false;
+        if (_adsPowerApi is not null) _ = _adsPowerApi.StopAsync();
         _eventSentryBridge.Dispose();
         _systemBrowserLauncher.Dispose();
     }
 
     private static string GetAppDataPath()
     {
+        var overridePath = Environment.GetEnvironmentVariable("PROXY_SENTRY_DATA_DIR");
+        if (!string.IsNullOrWhiteSpace(overridePath) && Path.IsPathFullyQualified(overridePath))
+            return Path.GetFullPath(overridePath);
         var basePath = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         if (string.Equals(Path.GetFileName(basePath), "components", StringComparison.OrdinalIgnoreCase))
         {

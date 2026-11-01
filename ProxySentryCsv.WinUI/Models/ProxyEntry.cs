@@ -29,6 +29,46 @@ public sealed class ProxyEntry : INotifyPropertyChanged
     private string _eventSentryRunId = "";
     private DateTimeOffset? _eventSentryHeartbeat;
     private int _listNumber;
+    private bool _isDirect;
+    private bool _isBusy;
+    private string _notes = "";
+    private string _tags = "";
+    private DateTimeOffset? _lastUsedUtc;
+
+    public string Notes
+    {
+        get => _notes;
+        set { var next = value ?? ""; if (_notes == next) return; _notes = next; OnPropertyChanged(); }
+    }
+    public string Tags
+    {
+        get => _tags;
+        set
+        {
+            var next = string.Join(", ", (value ?? "").Split(',').Select(t => t.Trim()).Where(t => t.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase));
+            if (_tags == next) return;
+            _tags = next;
+            OnPropertyChanged();
+        }
+    }
+    public DateTimeOffset? LastUsedUtc
+    {
+        get => _lastUsedUtc;
+        set { if (_lastUsedUtc == value) return; _lastUsedUtc = value; OnPropertyChanged(); }
+    }
+
+    public bool IsBusy
+    {
+        get => _isBusy;
+        set { if (_isBusy == value) return; _isBusy = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanOpen)); }
+    }
+    public bool CanOpen => !IsBusy;
+    public bool IsDirect
+    {
+        get => _isDirect;
+        set { if (_isDirect == value) return; _isDirect = value; OnPropertyChanged(); OnPropertyChanged(nameof(ConnectionRouteLabel)); }
+    }
+    public string ConnectionRouteLabel => IsDirect ? "DIRECT" : "";
 
     public int RowNumber { get; set; }
     public int ListNumber
@@ -83,12 +123,14 @@ public sealed class ProxyEntry : INotifyPropertyChanged
 
     public string NormalizedProxy => $"{Scheme.ToLowerInvariant()}://{Username}:{Password}@{Host.ToLowerInvariant()}:{Port}";
 
+    public string ProfileId { get; set; } = "";
+    public string CredentialKey => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(NormalizedProxy)));
+
     public string StableId
     {
         get
         {
-            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(NormalizedProxy));
-            return Convert.ToHexString(bytes);
+            return string.IsNullOrWhiteSpace(ProfileId) ? CredentialKey : ProfileId;
         }
     }
 
@@ -305,6 +347,7 @@ public sealed class ProxyEntry : INotifyPropertyChanged
             }
 
             _isOpen = value;
+            if (value) LastUsedUtc = DateTimeOffset.UtcNow;
             OnPropertyChanged();
             OnPropertyChanged(nameof(OpenButtonText));
             OnPropertyChanged(nameof(OpenButtonBrush));

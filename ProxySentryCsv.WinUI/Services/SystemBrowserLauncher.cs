@@ -19,9 +19,10 @@ public sealed record BrowserLeaseResult(
     int ProcessId,
     int DebuggingPort,
     string CdpEndpoint,
-    string ProfilePath);
+    string ProfilePath,
+    string BidiEndpoint = "");
 
-public sealed class SystemBrowserLauncher : IDisposable
+public sealed partial class SystemBrowserLauncher : IDisposable
 {
     private const string ChromiumProfileEmailExtensionId = "gahffllgkafjhcnfdlddhkodfjdffaeb";
     private const string ChromiumExtensionPublicKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtHDSpQLbRhLz8QnJ1iDvM9eSkmi87+EN+cjKdWlNuBig42SVx9lnouvs02xWcoE9BUIUvEyBZ3ZUyd8q0u0z9M7+7a91rudLmDgs6N8CY7YFjrltEXStjFxz8ixENRC+F8otnUqIL5Jx0vzU1OgFSdNb6HiDGZv+txfjPNvYZOlkJNRtPboCBXticOuAprNna6CRPGqN7aqu3ceBDhWVAAXVnKPo4aiUjYlSbQE8bBBeEg27J2qXT9Np9jMmzywnbTic18Ib2zRbkM26XWEBInXo8tnAobnUj7Xkdsbnn8vl+jnRe6INv81QAsYvEa4u9wZFzVHPWw0VO9EbddhrZQIDAQAB";
@@ -48,6 +49,40 @@ public sealed class SystemBrowserLauncher : IDisposable
     public event Action<IReadOnlyList<string>>? ProfilesClosed;
 
     public bool IsChromeSyncRunning => _chromeSync.IsRunning;
+    public int GetRunningProcessId(ProxyEntry proxy)
+    {
+        lock (_gate)
+            return _running.TryGetValue(proxy.StableId, out var browser) && !browser.Process.HasExited ? browser.Process.Id : 0;
+    }
+    public WindowQueueSnapshot? GetSyncQueueSnapshot(ProxyEntry proxy) => _chromeSync.GetQueueSnapshot(proxy.StableId);
+
+    public RelaySnapshot? GetConnectionSnapshot(ProxyEntry proxy)
+    {
+        lock (_gate) return _running.TryGetValue(proxy.StableId, out var browser) ? browser.Relay.Snapshot : null;
+    }
+
+    public void SetConnectionRoute(ProxyEntry proxy, ProxyRouteMode route)
+    {
+        lock (_gate)
+        {
+            if (!_running.TryGetValue(proxy.StableId, out var browser))
+                throw new InvalidOperationException("This profile is not open in Chrome, Edge or Firefox.");
+            browser.Relay.SetRoute(route);
+        }
+    }
+
+    public Task<ProxyCheckResult> CheckConnectionAsync(ProxyEntry proxy, Uri target, CancellationToken token)
+    {
+        LocalProxyRelay? relay;
+        lock (_gate) relay = _running.TryGetValue(proxy.StableId, out var browser) ? browser.Relay : null;
+        return new ProxySpeedChecker().CheckAsync(proxy, target, token, relay);
+    }
+
+    public string GetInstalledVersion(string provider)
+    {
+        try { return GetBrowserVersion(ResolveBrowserExecutable(NormalizeProvider(provider))).FullVersion ?? "Unavailable"; }
+        catch { return "Unavailable"; }
+    }
 
     public void SetProfileEmailButtonOptions(bool chrome, bool edge, bool firefox)
     {
@@ -76,7 +111,8 @@ public sealed class SystemBrowserLauncher : IDisposable
         string targetUrl,
         string provider,
         Action<string>? progress = null,
-        SyncWindowPlacement? initialPlacement = null)
+        SyncWindowPlacement? initialPlacement = null,
+        bool enableSync = false)
     {
         var normalizedProvider = NormalizeProvider(provider);
         if (!IsSystemBrowser(normalizedProvider))
@@ -93,10 +129,6 @@ public sealed class SystemBrowserLauncher : IDisposable
         var emailButtonEnabled = IsProfileEmailButtonEnabled(normalizedProvider);
         var profileEmail = emailButtonEnabled && !string.IsNullOrWhiteSpace(proxy.Email) ? proxy.Email : "";
         ApplyFingerprintGeo(proxy, fingerprint);
-        if (IsChromiumProvider(normalizedProvider))
-        {
-            ApplyChromiumBrowserVersion(fingerprint, normalizedProvider, browserVersion.FullVersion);
-        }
 
         var profilePath = GetProfilePath(normalizedProvider, proxy);
         var extensionProfilePath = GetExtensionProfilePath(normalizedProvider, proxy);
@@ -181,6 +213,20 @@ public sealed class SystemBrowserLauncher : IDisposable
                 startInfo.ArgumentList.Add("-no-remote");
                 startInfo.ArgumentList.Add("-profile");
                 startInfo.ArgumentList.Add(profilePath);
+                // Keep native Firefox attachable without replacing its profile later.
+                // The endpoint is local only, as for Chrome/Edge above.
+                {
+                    debuggingPort = GetFreeLoopbackPort();
+                    startInfo.ArgumentList.Add("--remote-debugging-port");
+                    startInfo.ArgumentList.Add(debuggingPort.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    if (initialPlacement is { } bounds)
+                    {
+                        startInfo.ArgumentList.Add("--width");
+                        startInfo.ArgumentList.Add(bounds.Width.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                        startInfo.ArgumentList.Add("--height");
+                        startInfo.ArgumentList.Add(bounds.Height.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    }
+                }
                 startInfo.ArgumentList.Add("-new-window");
                 startInfo.ArgumentList.Add(targetUrl);
             }
@@ -199,7 +245,7 @@ public sealed class SystemBrowserLauncher : IDisposable
                     progress?.Invoke($"Firefox profile email endpoint skipped: {ex.Message}");
                 }
             }
-            if (debuggingPort.HasValue)
+            if (debuggingPort.HasValue && IsChromiumProvider(normalizedProvider))
             {
                 devToolsSession = await ApplyChromiumDevToolsOverridesAsync(
                     debuggingPort.Value,
@@ -240,14 +286,18 @@ public sealed class SystemBrowserLauncher : IDisposable
 
     }
 
-    public async Task<BrowserLeaseResult> EnsureChromeReadyForEventSentryAsync(
+    public async Task<BrowserLeaseResult> EnsureNativeReadyForEventSentryAsync(
         ProxyEntry proxy,
         string runId,
         bool background,
         Action<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        const string provider = "chrome";
+        var provider = NormalizeProvider(proxy.BrowserProvider);
+        if (!IsSystemBrowser(provider))
+            throw new InvalidOperationException("Event Sentry supports native Chrome, Edge and Firefox profiles. Select the browser in Proxy Sentry.");
+        if (provider == "firefox" && IsChromeSyncRunning)
+            throw new InvalidOperationException("Stop browser synchronization before using Firefox with Event Sentry.");
         var profilePath = GetProfilePath(provider, proxy);
 
         TrackedBrowser? tracked;
@@ -258,12 +308,14 @@ public sealed class SystemBrowserLauncher : IDisposable
 
         if (tracked is not null)
         {
+            if (!tracked.Process.HasExited && tracked.Provider != provider)
+                throw new InvalidOperationException($"Browser mismatch: selected {GetBrowserDisplayName(provider)}, but {GetBrowserDisplayName(tracked.Provider)} is still open. Close that profile window in Proxy Sentry, then retry. Its cookies are preserved per browser.");
             if (!tracked.Process.HasExited
                 && string.Equals(tracked.Provider, provider, StringComparison.OrdinalIgnoreCase)
                 && tracked.DebuggingPort is > 0
-                && await IsDevToolsEndpointAvailableAsync(tracked.DebuggingPort.Value, cancellationToken))
+                && await IsNativeEndpointAvailableAsync(provider, tracked.DebuggingPort.Value, cancellationToken))
             {
-                progress?.Invoke($"Event Sentry reused Chrome profile {proxy.ProfileKey}.");
+                progress?.Invoke($"Event Sentry reused native {GetBrowserDisplayName(provider)} profile {proxy.ProfileKey}.");
                 if (background)
                 {
                     PlaceBrowserInBackground(tracked.Process, progress);
@@ -274,9 +326,13 @@ public sealed class SystemBrowserLauncher : IDisposable
                     provider,
                     tracked.Process.Id,
                     tracked.DebuggingPort.Value,
-                    $"http://127.0.0.1:{tracked.DebuggingPort.Value}",
-                    profilePath);
+                    provider == "firefox" ? "" : $"http://127.0.0.1:{tracked.DebuggingPort.Value}",
+                    profilePath,
+                    provider == "firefox" ? $"ws://127.0.0.1:{tracked.DebuggingPort.Value}/session" : "");
             }
+
+            if (!tracked.Process.HasExited)
+                throw new InvalidOperationException("The existing browser is not ready for control. Close and reopen this profile in the updated Proxy Sentry; its cookies and data will be kept.");
 
             lock (_gate)
             {
@@ -291,113 +347,34 @@ public sealed class SystemBrowserLauncher : IDisposable
             tracked.Relay.Dispose();
         }
 
-        var executablePath = await ResolveBrowserExecutableAsync(provider, progress);
-        var browserVersion = GetBrowserVersion(executablePath);
-        var fingerprint = await _fingerprints.GetOrCreateAsync(proxy, provider, browserVersion.Major, progress);
-        ApplyFingerprintGeo(proxy, fingerprint);
-        ApplyChromiumBrowserVersion(fingerprint, provider, browserVersion.FullVersion);
-
-        var extensionProfilePath = GetExtensionProfilePath(provider, proxy);
-        Directory.CreateDirectory(profilePath);
-        Directory.CreateDirectory(extensionProfilePath);
-
-        var relay = LocalProxyRelay.Start(proxy, progress);
-        IDisposable? devToolsSession = null;
-        IDisposable? profileEmailResource = null;
-        Process? process = null;
-        var debuggingPort = GetFreeLoopbackPort();
-
-        try
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Invoke($"Event Sentry opening native {GetBrowserDisplayName(provider)} profile {proxy.ProfileKey} for run {ShortRunId(runId)}.");
+        await LaunchAsync(proxy, "about:blank", provider, progress, enableSync: true);
+        lock (_gate) _running.TryGetValue(proxy.StableId, out tracked);
+        if (tracked?.DebuggingPort is not > 0)
+            throw new InvalidOperationException("The native browser did not expose a local control endpoint.");
+        for (var attempt = 0; attempt < 100; attempt++)
         {
-            var windowLabel = GetWindowLabel(proxy);
-            var emailButtonEnabled = IsProfileEmailButtonEnabled(provider);
-            var profileEmail = emailButtonEnabled && !string.IsNullOrWhiteSpace(proxy.Email) ? proxy.Email : "";
-            var chromiumExtensionPaths = new List<string>();
-            if (!string.IsNullOrWhiteSpace(profileEmail))
+            cancellationToken.ThrowIfCancellationRequested();
+            if (await IsNativeEndpointAvailableAsync(provider, tracked.DebuggingPort.Value, cancellationToken))
             {
-                chromiumExtensionPaths.Add(WriteChromiumProfileEmailExtension(extensionProfilePath, profileEmail, windowLabel));
+                if (background) PlaceBrowserInBackground(tracked.Process, progress);
+                return new BrowserLeaseResult(proxy.ProfileKey, provider, tracked.Process.Id, tracked.DebuggingPort.Value,
+                    provider == "firefox" ? "" : $"http://127.0.0.1:{tracked.DebuggingPort.Value}", profilePath,
+                    provider == "firefox" ? $"ws://127.0.0.1:{tracked.DebuggingPort.Value}/session" : "");
             }
-            chromiumExtensionPaths.AddRange(GetGlobalChromiumExtensionPaths(provider, progress));
-            var chromiumExtensionPath = string.Join(",", chromiumExtensionPaths);
-
-            RemoveChromiumBrowserForgeExtension(profilePath, extensionProfilePath, progress);
-            WriteChromiumPreferences(
-                profilePath,
-                fingerprint,
-                !string.IsNullOrWhiteSpace(profileEmail) ? ChromiumProfileEmailExtensionId : "");
-
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = executablePath,
-                WorkingDirectory = Path.GetDirectoryName(executablePath) ?? AppContext.BaseDirectory,
-                UseShellExecute = false
-            };
-            if (!string.IsNullOrWhiteSpace(fingerprint.TimeZone))
-            {
-                startInfo.Environment["TZ"] = fingerprint.TimeZone;
-            }
-
-            AddChromiumArguments(
-                startInfo,
-                profilePath,
-                "about:blank",
-                relay.Port,
-                fingerprint,
-                chromiumExtensionPath,
-                provider,
-                debuggingPort,
-                null);
-
-            progress?.Invoke($"Event Sentry launching Chrome profile {proxy.ProfileKey} for run {ShortRunId(runId)}.");
-            process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start Chrome.");
-            process.EnableRaisingEvents = true;
-            process.Exited += (_, _) => MarkClosed(proxy.StableId);
-            if (background)
-            {
-                PlaceBrowserInBackground(process, progress);
-            }
-
-            devToolsSession = await ApplyChromiumDevToolsOverridesAsync(
-                debuggingPort,
-                "about:blank",
-                fingerprint,
-                provider,
-                windowLabel,
-                SplitChromiumExtensionPaths(chromiumExtensionPath),
-                progress);
-
-            tracked = new TrackedBrowser(process, provider, relay, devToolsSession, debuggingPort, profileEmailResource);
-            lock (_gate)
-            {
-                _running[proxy.StableId] = tracked;
-            }
-
-            return new BrowserLeaseResult(
-                proxy.ProfileKey,
-                provider,
-                process.Id,
-                debuggingPort,
-                $"http://127.0.0.1:{debuggingPort}",
-                profilePath);
+            await Task.Delay(100, cancellationToken);
         }
-        catch
-        {
-            try
-            {
-                if (process is not null && !process.HasExited)
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-            }
-            catch
-            {
-            }
+        throw new InvalidOperationException("The native browser did not become ready. Its window and profile have been left open.");
+    }
 
-            profileEmailResource?.Dispose();
-            devToolsSession?.Dispose();
-            relay.Dispose();
-            throw;
-        }
+    private static async Task<bool> IsNativeEndpointAvailableAsync(string provider, int port, CancellationToken token)
+    {
+        if (provider != "firefox") return await IsDevToolsEndpointAvailableAsync(port, token);
+        // Do not claim a BiDi session just to probe it: Firefox allows only one controller.
+        using var socket = new TcpClient();
+        try { await socket.ConnectAsync(IPAddress.Loopback, port, token).AsTask().WaitAsync(TimeSpan.FromSeconds(1), token); return true; }
+        catch (Exception ex) when (ex is SocketException or TimeoutException) { return false; }
     }
 
     public Task BringToFrontAsync(ProxyEntry proxy, CancellationToken cancellationToken = default)
@@ -498,25 +475,25 @@ public sealed class SystemBrowserLauncher : IDisposable
         if (_chromeSync.IsRunning)
         {
             var count = await _chromeSync.NavigateAsync(targetUrl, cancellationToken);
-            progress?.Invoke($"Chrome sync group navigated to {targetUrl}.");
+            progress?.Invoke($"Sync group navigated to {targetUrl}.");
             return count;
         }
 
         var sessions = GetOpenSyncSessions(proxies, "chromium-sync");
         if (sessions.Count == 0)
         {
-            throw new InvalidOperationException("No opened Chrome windows are available.");
+            throw new InvalidOperationException("No opened Chrome or Firefox sync windows are available.");
         }
 
         foreach (var session in sessions)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            using var client = await ChromeDevToolsClient.ConnectAsync(session.DebuggingPort, cancellationToken);
+            using var client = await BrowserSyncClient.ConnectAsync(session.Provider, session.DebuggingPort, cancellationToken);
             await client.SendAsync("Page.enable", cancellationToken: cancellationToken);
             await client.SendAsync("Page.navigate", new { url = targetUrl }, cancellationToken);
         }
 
-        progress?.Invoke($"Navigated {sessions.Count} Chrome window(s) to {targetUrl}.");
+        progress?.Invoke($"Navigated {sessions.Count} browser window(s) to {targetUrl}.");
         return sessions.Count;
     }
 
@@ -552,6 +529,27 @@ public sealed class SystemBrowserLauncher : IDisposable
             tracked.ProfileEmailResource?.Dispose();
             tracked.DevToolsSession?.Dispose();
             tracked.Relay.Dispose();
+        }
+    }
+
+    public void EnsureProfileStopped(ProxyEntry proxy, string provider)
+    {
+        lock (_gate)
+            if (_running.ContainsKey(proxy.StableId))
+                throw new InvalidOperationException("Close all windows of this profile before resetting it.");
+        var processName = provider switch { "chrome" => "chrome.exe", "edge" => "msedge.exe", "firefox" => "firefox.exe", _ => throw new ArgumentException("Unsupported browser.") };
+        var path = NormalizeCommandLinePath(GetProfilePath(provider, proxy));
+        using var searcher = new ManagementObjectSearcher($"SELECT CommandLine FROM Win32_Process WHERE Name = '{processName}'");
+        foreach (ManagementObject process in searcher.Get().Cast<ManagementObject>())
+        {
+            using (process)
+            {
+                var commandLine = process["CommandLine"]?.ToString();
+                if (string.IsNullOrWhiteSpace(commandLine))
+                    throw new InvalidOperationException("Cannot verify that browser profiles are closed. Close this browser before resetting.");
+                if (NormalizeCommandLinePath(commandLine).Contains(path, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("This profile still has a browser process running. Close it before resetting.");
+            }
         }
     }
 
@@ -664,6 +662,8 @@ public sealed class SystemBrowserLauncher : IDisposable
 
     public async Task StartChromeSyncAsync(IReadOnlyList<ProxyEntry> proxies, Action<string>? progress = null, CancellationToken cancellationToken = default)
     {
+        if (proxies.Any(proxy => !CanSynchronizeWindow(proxy)))
+            throw new InvalidOperationException("Open every selected profile using Open sync group first. Firefox windows opened individually need to be closed and reopened as a sync group.");
         var sessions = GetOpenSyncSessions(proxies, "chromium-sync");
         await _chromeSync.StartAsync(sessions, progress, cancellationToken);
     }
@@ -715,7 +715,15 @@ public sealed class SystemBrowserLauncher : IDisposable
 
     private static bool IsChromiumSyncProvider(string? provider)
     {
-        return NormalizeProvider(provider) is "chrome";
+        return NormalizeProvider(provider) is "chrome" or "firefox";
+    }
+
+    public bool CanSynchronizeWindow(ProxyEntry proxy)
+    {
+        lock (_gate)
+            return _running.TryGetValue(proxy.StableId, out var browser)
+                && !browser.Process.HasExited && browser.DebuggingPort is > 0
+                && IsChromiumSyncProvider(browser.Provider);
     }
 
     private static bool IsChromiumProvider(string? provider)
@@ -773,8 +781,11 @@ public sealed class SystemBrowserLauncher : IDisposable
         {
             startInfo.ArgumentList.Add("--enable-unsafe-extension-debugging");
         }
-        startInfo.ArgumentList.Add($"--lang={NormalizePrimaryLocale(fingerprint.Locale)}");
-        startInfo.ArgumentList.Add($"--accept-lang={ToChromiumAcceptLanguage(fingerprint)}");
+        if (!string.IsNullOrWhiteSpace(fingerprint.Locale))
+        {
+            startInfo.ArgumentList.Add($"--lang={NormalizePrimaryLocale(fingerprint.Locale)}");
+            startInfo.ArgumentList.Add($"--accept-lang={ToChromiumAcceptLanguage(fingerprint)}");
+        }
         startInfo.ArgumentList.Add($"--proxy-server=http://127.0.0.1:{relayPort}");
         startInfo.ArgumentList.Add("--proxy-bypass-list=<-loopback>");
         if (provider == "edge")
@@ -817,7 +828,8 @@ public sealed class SystemBrowserLauncher : IDisposable
             root = [];
         }
 
-        SetJsonValue(root, ["intl"], "accept_languages", ToChromiumAcceptLanguage(fingerprint));
+        if (!string.IsNullOrWhiteSpace(fingerprint.Locale))
+            SetJsonValue(root, ["intl"], "accept_languages", ToChromiumAcceptLanguage(fingerprint));
         SetJsonValue(root, ["profile", "default_content_setting_values"], "geolocation", 1);
         SetJsonValue(root, ["profile", "default_content_setting_values"], "media_stream_camera", 2);
         SetJsonValue(root, ["profile", "default_content_setting_values"], "media_stream_mic", 2);
@@ -1035,8 +1047,17 @@ public sealed class SystemBrowserLauncher : IDisposable
             await LoadChromiumExtensionsAsync(debuggingPort, extensionPaths, progress, timeout.Token);
             client = await ChromeDevToolsClient.ConnectAsync(debuggingPort, timeout.Token);
             await client.SendAsync("Page.enable", cancellationToken: timeout.Token);
-            await TrySendCdpCommandAsync(client, "Emulation.setTimezoneOverride", new { timezoneId = fingerprint.TimeZone }, null, timeout.Token);
-            await TrySendCdpCommandAsync(client, "Emulation.setLocaleOverride", new { locale = NormalizePrimaryLocale(fingerprint.Locale) }, null, timeout.Token);
+            if (!string.IsNullOrWhiteSpace(fingerprint.TimeZone))
+                await TrySendCdpCommandAsync(client, "Emulation.setTimezoneOverride", new { timezoneId = fingerprint.TimeZone }, progress, timeout.Token);
+            if (!string.IsNullOrWhiteSpace(fingerprint.Locale))
+                await TrySendCdpCommandAsync(client, "Emulation.setLocaleOverride", new { locale = NormalizePrimaryLocale(fingerprint.Locale) }, progress, timeout.Token);
+            try
+            {
+                using var checkTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                var regionCheck = await client.SendAsync("Runtime.evaluate", new { expression = BrowserRegionDiagnostics.ReadExpression, returnByValue = true }, checkTimeout.Token);
+                progress?.Invoke(BrowserRegionDiagnostics.Describe(regionCheck, fingerprint));
+            }
+            catch (Exception) { progress?.Invoke("Regional check unavailable; continuing browser navigation."); }
             if (!string.IsNullOrWhiteSpace(windowLabel))
             {
                 var titleScript = BuildWindowTitleScript(windowLabel);
@@ -1044,7 +1065,7 @@ public sealed class SystemBrowserLauncher : IDisposable
                 await TrySendCdpCommandAsync(client, "Runtime.evaluate", new { expression = titleScript, awaitPromise = false }, null, timeout.Token);
             }
             await client.SendAsync("Page.navigate", new { url = targetUrl }, timeout.Token);
-            progress?.Invoke($"Chrome page locale applied: {fingerprint.TimeZone}, {fingerprint.Locale}.");
+            progress?.Invoke($"{GetBrowserDisplayName(provider)} opened with native User-Agent. Other tabs can be checked in Profile Details.");
             var result = client;
             client = null;
             return result;
@@ -1264,6 +1285,7 @@ public sealed class SystemBrowserLauncher : IDisposable
 
     private static void WriteFirefoxProfile(string profilePath, int relayPort, BrowserForgeFingerprint fingerprint)
     {
+        FirefoxNativePreferences.Migrate(profilePath);
         var prefs = new StringBuilder();
         prefs.AppendLine("user_pref(\"network.proxy.type\", 1);");
         prefs.AppendLine("user_pref(\"network.proxy.no_proxies_on\", \"\");");
@@ -1283,9 +1305,11 @@ public sealed class SystemBrowserLauncher : IDisposable
         prefs.AppendLine($"user_pref(\"network.proxy.http_port\", {relayPort});");
         prefs.AppendLine($"user_pref(\"network.proxy.ssl\", {Json("127.0.0.1")});");
         prefs.AppendLine($"user_pref(\"network.proxy.ssl_port\", {relayPort});");
-        prefs.AppendLine($"user_pref(\"general.useragent.override\", {Json(fingerprint.UserAgent)});");
-        prefs.AppendLine($"user_pref(\"intl.accept_languages\", {Json(ToFirefoxAcceptLanguages(fingerprint))});");
-        prefs.AppendLine($"user_pref(\"intl.locale.requested\", {Json(NormalizePrimaryLocale(fingerprint.Locale))});");
+        if (!string.IsNullOrWhiteSpace(fingerprint.Locale))
+        {
+            prefs.AppendLine($"user_pref(\"intl.accept_languages\", {Json(ToFirefoxAcceptLanguages(fingerprint))});");
+            prefs.AppendLine($"user_pref(\"intl.locale.requested\", {Json(NormalizePrimaryLocale(fingerprint.Locale))});");
+        }
         prefs.AppendLine("user_pref(\"intl.regional_prefs.use_os_locales\", false);");
         prefs.AppendLine($"user_pref(\"javascript.use_us_english_locale\", false);");
         prefs.AppendLine($"user_pref(\"privacy.resistFingerprinting\", false);");
@@ -1298,7 +1322,6 @@ public sealed class SystemBrowserLauncher : IDisposable
 
         var prefsText = prefs.ToString();
         File.WriteAllText(Path.Combine(profilePath, "user.js"), prefsText, Encoding.UTF8);
-        File.WriteAllText(Path.Combine(profilePath, "prefs.js"), prefsText, Encoding.UTF8);
     }
 
     private static void WriteFirefoxBrowserForgeExtension(string profilePath, string extensionProfilePath, BrowserForgeFingerprint fingerprint, string windowLabel, string profileEmail)
@@ -1341,7 +1364,7 @@ public sealed class SystemBrowserLauncher : IDisposable
 {
   "manifest_version": 2,
   "name": "Proxy Sentry BrowserForge",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Applies Proxy Sentry CSV BrowserForge profile values.",
   "applications": {
     "gecko": {
@@ -1368,6 +1391,10 @@ public sealed class SystemBrowserLauncher : IDisposable
   const fp = {{payload}};
   const source = `(() => {
     const fp = ${JSON.stringify(fp)};
+    if (!(fp.timeZone || fp.TimeZone) || !(fp.locale || fp.Locale)) {
+      {{titleScript}}
+      return;
+    }
     const locale = fp.locale || fp.Locale || "en-US";
     const languages = fp.languages || fp.Languages || [locale, locale.split("-")[0]];
     const timeZone = fp.timeZone || fp.TimeZone || "America/New_York";
@@ -1378,7 +1405,6 @@ public sealed class SystemBrowserLauncher : IDisposable
     };
     try {
       const nav = Navigator.prototype;
-      defineGetter(nav, "userAgent", fp.userAgent || fp.UserAgent || "");
       defineGetter(nav, "platform", fp.platform || fp.Platform || "Win32");
       defineGetter(nav, "language", locale);
       defineGetter(nav, "languages", languages);
@@ -1846,7 +1872,6 @@ try {
     const webGLRenderer = fp.webGLRenderer || fp.WebGLRenderer || "ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)";
 
     const nav = Navigator.prototype;
-    defineGetter(nav, "userAgent", fp.userAgent || fp.UserAgent || "");
     defineGetter(nav, "platform", fp.platform || fp.Platform || "Win32");
     defineGetter(nav, "vendor", fp.vendor || fp.Vendor || "");
     defineGetter(nav, "language", locale);
@@ -2272,53 +2297,6 @@ try {
     };
     blockRtc();
 
-    let userAgentData = null;
-    try {
-      userAgentData = navigator.userAgentData;
-    } catch (_) {}
-    if (userAgentData) {
-      const browser = fp.browser || fp.Browser || "chrome";
-      const brand = browser === "edge" ? "Microsoft Edge" : browser === "firefox" ? "Firefox" : "Google Chrome";
-      const userAgent = fp.userAgent || fp.UserAgent || "";
-      const fullVersion = (userAgent.match(/(?:Edg|Chrome|Firefox)\/(\d+(?:\.\d+)+)/) || [])[1] || "120.0.0.0";
-      const majorVersion = (fullVersion.match(/^(\d+)/) || [])[1] || "120";
-      const brands = [
-        { brand: "Not;A=Brand", version: "99" },
-        { brand: "Chromium", version: majorVersion },
-        { brand, version: majorVersion }
-      ];
-      const fullVersionList = [
-        { brand: "Not;A=Brand", version: "99.0.0.0" },
-        { brand: "Chromium", version: fullVersion },
-        { brand, version: fullVersion }
-      ];
-      const uaPrototype = Object.getPrototypeOf(userAgentData);
-      if (uaPrototype) {
-        defineGetter(uaPrototype, "platform", "Windows");
-        defineGetter(uaPrototype, "mobile", false);
-        defineGetter(uaPrototype, "brands", brands);
-        try {
-          Object.defineProperty(uaPrototype, "getHighEntropyValues", {
-            value: function(hints) {
-              const requested = Array.isArray(hints) ? hints : [];
-              const values = { brands, mobile: false, platform: "Windows" };
-              for (const hint of requested) {
-                if (hint === "architecture") values.architecture = "x86";
-                if (hint === "bitness") values.bitness = "64";
-                if (hint === "fullVersion") values.fullVersion = fullVersion;
-                if (hint === "fullVersionList") values.fullVersionList = fullVersionList;
-                if (hint === "model") values.model = "";
-                if (hint === "platformVersion") values.platformVersion = "10.0.0";
-                if (hint === "uaFullVersion") values.uaFullVersion = fullVersion;
-                if (hint === "wow64") values.wow64 = false;
-              }
-              return Promise.resolve(values);
-            },
-            configurable: true
-          });
-        } catch (_) {}
-      }
-    }
   };
 
   try {
@@ -2579,22 +2557,6 @@ emailElement.addEventListener("click", copyEmail);
 
         var match = Regex.Match(raw, @"\d+(?:\.\d+){1,3}");
         return match.Success ? match.Value : null;
-    }
-
-    private static void ApplyChromiumBrowserVersion(BrowserForgeFingerprint fingerprint, string provider, string? fullVersion)
-    {
-        if (string.IsNullOrWhiteSpace(fullVersion) || string.IsNullOrWhiteSpace(fingerprint.UserAgent))
-        {
-            return;
-        }
-
-        fingerprint.UserAgent = Regex.Replace(fingerprint.UserAgent, @"Chrome/\d+(?:\.\d+)+", $"Chrome/{fullVersion}", RegexOptions.IgnoreCase);
-        if (provider == "edge")
-        {
-            fingerprint.UserAgent = Regex.Replace(fingerprint.UserAgent, @"Edg/\d+(?:\.\d+)+", $"Edg/{fullVersion}", RegexOptions.IgnoreCase);
-        }
-
-        fingerprint.Headers["User-Agent"] = fingerprint.UserAgent;
     }
 
     private static IEnumerable<string> GetBrowserCandidates(string provider)

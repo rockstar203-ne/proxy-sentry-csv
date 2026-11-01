@@ -5,9 +5,9 @@
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>ProxySentryCsv</RootNamespace>
     <AssemblyName>Proxy Sentry CSV</AssemblyName>
-    <Version>1.8.20</Version>
-    <AssemblyVersion>1.8.20.0</AssemblyVersion>
-    <FileVersion>1.8.20.0</FileVersion>
+    <Version>1.8.21</Version>
+    <AssemblyVersion>1.8.21.0</AssemblyVersion>
+    <FileVersion>1.8.21.0</FileVersion>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <UseWinUI>true</UseWinUI>
@@ -24,9 +24,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.7.250606001" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" />
     <PackageReference Include="System.Management" Version="7.0.2" />
+    <PackageReference Include="MailKit" Version="4.17.0" />
   </ItemGroup>
 
   <ItemGroup>

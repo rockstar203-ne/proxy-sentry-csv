@@ -1,0 +1,11 @@
+Proxy,Name,Email,Browser,Country,Region
+192.0.2.1:8080,Main test profile,main@example.test,chrome,US,California
+192.0.2.2:8080,Second profile with a longer name,second@example.test,edge,GB,England
+192.0.2.3:8080,Firefox test,firefox@example.test,firefox,DE,Bavaria
+192.0.2.4:8080,Fourth profile,,chrome,CA,Ontario
+192.0.2.5:8080,Fifth profile,,chrome,US,Virginia
+192.0.2.6:8080,Sixth profile,,firefox,FR,Paris
+192.0.2.7:8080,Seventh profile,,edge,US,California
+192.0.2.8:8080,Eighth profile,,chrome,US,California
+192.0.2.9:8080,Ninth profile,,chrome,US,California
+192.0.2.10:8080,Tenth profile,,firefox,US,California

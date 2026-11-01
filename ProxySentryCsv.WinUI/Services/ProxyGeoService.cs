@@ -26,13 +26,13 @@ public sealed class ProxyGeoService
                 var cached = JsonSerializer.Deserialize<ProxyGeoInfo>(await File.ReadAllTextAsync(path, cancellationToken));
                 if (cached is not null
                     && !string.IsNullOrWhiteSpace(cached.CountryCode)
-                    && cached.HasCoordinates)
+                    && cached.Source == "proxy-exit")
                 {
                     progress?.Invoke($"Proxy geo loaded: {cached.CountryCode}, {cached.Locale}, {cached.TimeZone}.");
                     return cached;
                 }
             }
-            catch
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
             }
         }
@@ -40,11 +40,13 @@ public sealed class ProxyGeoService
         try
         {
             var geo = await DetectViaProxyAsync(proxy, cancellationToken);
+            geo.Source = "proxy-exit";
+            geo.CheckedAtUtc = DateTimeOffset.UtcNow;
             await File.WriteAllTextAsync(path, JsonSerializer.Serialize(geo, AppJsonOptions.Indented), cancellationToken);
             progress?.Invoke($"Proxy geo detected through proxy: {geo.CountryCode}, {geo.Locale}, {geo.TimeZone}.");
             return geo;
         }
-        catch (Exception proxyEx)
+        catch (Exception proxyEx) when (proxyEx is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             progress?.Invoke($"Proxy geo through proxy failed: {proxyEx.Message}");
         }
@@ -52,14 +54,16 @@ public sealed class ProxyGeoService
         try
         {
             var geo = await DetectHostGeoAsync(proxy, cancellationToken);
+            geo.Source = "proxy-host";
+            geo.CheckedAtUtc = DateTimeOffset.UtcNow;
             await File.WriteAllTextAsync(path, JsonSerializer.Serialize(geo, AppJsonOptions.Indented), cancellationToken);
             progress?.Invoke($"Proxy host geo detected: {geo.CountryCode}, {geo.Locale}, {geo.TimeZone}.");
             return geo;
         }
-        catch (Exception hostEx)
+        catch (Exception hostEx) when (hostEx is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             progress?.Invoke($"Proxy geo fallback: {hostEx.Message}");
-            return FromCountry("", "", proxy.Host);
+            return new ProxyGeoInfo();
         }
     }
 
@@ -134,33 +138,24 @@ public sealed class ProxyGeoService
         string? postalCode = null)
     {
         var country = (countryCode ?? "").Trim().ToUpperInvariant();
-        var locale = CountryLocale(country);
-        var zone = !string.IsNullOrWhiteSpace(timeZone) ? timeZone.Trim() : CountryTimeZone(country);
-        var fallback = CountryFallbackLocation(country);
+        if (country.Length != 2 || country.Any(ch => ch is < 'A' or > 'Z')) country = "";
+        var locale = country.Length == 0 ? "" : CountryLocale(country);
+        var zone = timeZone?.Trim() ?? "";
         return new ProxyGeoInfo
         {
             Query = query ?? "",
-            CountryCode = string.IsNullOrWhiteSpace(country) ? "US" : country,
+            CountryCode = country,
             Locale = locale,
             TimeZone = zone,
-            Latitude = latitude is > -90 and < 90 ? latitude.Value : fallback.Latitude,
-            Longitude = longitude is > -180 and < 180 ? longitude.Value : fallback.Longitude,
-            City = !string.IsNullOrWhiteSpace(city) ? city.Trim() : fallback.City,
-            Region = !string.IsNullOrWhiteSpace(region) ? region.Trim() : fallback.Region,
-            PostalCode = !string.IsNullOrWhiteSpace(postalCode) ? postalCode.Trim() : fallback.PostalCode
+            Latitude = latitude is >= -90 and <= 90 ? latitude.Value : 0,
+            Longitude = longitude is >= -180 and <= 180 ? longitude.Value : 0,
+            CoordinatesKnown = latitude is >= -90 and <= 90 && longitude is >= -180 and <= 180,
+            City = city?.Trim() ?? "",
+            Region = region?.Trim() ?? "",
+            PostalCode = postalCode?.Trim() ?? ""
         };
     }
 
-    private static ProxyGeoLocation CountryFallbackLocation(string countryCode)
-    {
-        return countryCode switch
-        {
-            "US" => new ProxyGeoLocation(34.0522, -118.2437, "Los Angeles", "California", "90013"),
-            "CA" => new ProxyGeoLocation(43.6532, -79.3832, "Toronto", "Ontario", "M5H"),
-            "GB" or "IE" => new ProxyGeoLocation(51.5074, -0.1278, "London", "England", "SW1A"),
-            _ => new ProxyGeoLocation(34.0522, -118.2437, "Los Angeles", "California", "90013")
-        };
-    }
 
     private static string CountryLocale(string countryCode)
     {
@@ -202,42 +197,10 @@ public sealed class ProxyGeoService
             "AE" => "ar-AE",
             "SA" => "ar-SA",
             "ZA" => "en-ZA",
-            _ => "en-US"
+            _ => ""
         };
     }
 
-    private static string CountryTimeZone(string countryCode)
-    {
-        return countryCode switch
-        {
-            "US" => "America/New_York",
-            "CA" => "America/Toronto",
-            "GB" or "IE" => "Europe/London",
-            "AU" => "Australia/Sydney",
-            "NZ" => "Pacific/Auckland",
-            "DE" or "AT" or "CH" or "FR" or "BE" or "NL" or "ES" or "IT" or "PL" or "CZ" or "SK" => "Europe/Berlin",
-            "UA" => "Europe/Kyiv",
-            "RO" => "Europe/Bucharest",
-            "PT" => "Europe/Lisbon",
-            "BR" => "America/Sao_Paulo",
-            "MX" => "America/Mexico_City",
-            "AR" => "America/Argentina/Buenos_Aires",
-            "CL" => "America/Santiago",
-            "JP" => "Asia/Tokyo",
-            "KR" => "Asia/Seoul",
-            "CN" => "Asia/Shanghai",
-            "TW" => "Asia/Taipei",
-            "HK" => "Asia/Hong_Kong",
-            "SG" => "Asia/Singapore",
-            "IN" => "Asia/Kolkata",
-            "TR" => "Europe/Istanbul",
-            "IL" => "Asia/Jerusalem",
-            "AE" => "Asia/Dubai",
-            "SA" => "Asia/Riyadh",
-            "ZA" => "Africa/Johannesburg",
-            _ => "America/New_York"
-        };
-    }
 
     private sealed class IpApiResponse
     {
@@ -255,16 +218,17 @@ public sealed class ProxyGeoService
 
 public sealed class ProxyGeoInfo
 {
+    public string Source { get; set; } = "unknown";
+    public DateTimeOffset? CheckedAtUtc { get; set; }
+    public bool CoordinatesKnown { get; set; }
     public string Query { get; set; } = "";
-    public string CountryCode { get; set; } = "US";
-    public string Locale { get; set; } = "en-US";
-    public string TimeZone { get; set; } = "America/New_York";
-    public double Latitude { get; set; } = 34.0522;
-    public double Longitude { get; set; } = -118.2437;
-    public string City { get; set; } = "Los Angeles";
-    public string Region { get; set; } = "California";
-    public string PostalCode { get; set; } = "90013";
-    public bool HasCoordinates => Latitude is > -90 and < 90 && Longitude is > -180 and < 180;
+    public string CountryCode { get; set; } = "";
+    public string Locale { get; set; } = "";
+    public string TimeZone { get; set; } = "";
+    public double Latitude { get; set; }
+    public double Longitude { get; set; }
+    public string City { get; set; } = "";
+    public string Region { get; set; } = "";
+    public string PostalCode { get; set; } = "";
+    public bool HasCoordinates => CoordinatesKnown && Latitude is >= -90 and <= 90 && Longitude is >= -180 and <= 180;
 }
-
-public sealed record ProxyGeoLocation(double Latitude, double Longitude, string City, string Region, string PostalCode);

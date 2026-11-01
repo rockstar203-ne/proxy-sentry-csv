@@ -5,7 +5,7 @@ using System.Text.Json;
 
 namespace ProxySentryCsv.Services;
 
-internal sealed class ChromeDevToolsClient : IDisposable
+internal sealed class ChromeDevToolsClient : IBrowserSyncClient
 {
     private readonly ClientWebSocket _webSocket;
     private readonly CancellationTokenSource _stop = new();
@@ -21,6 +21,17 @@ internal sealed class ChromeDevToolsClient : IDisposable
     }
 
     public event Action<string, JsonElement>? EventReceived;
+
+    internal static async Task<ChromeDevToolsClient> ConnectWebSocketAsync(Uri endpoint, CancellationToken token)
+    {
+        var socket = new ClientWebSocket();
+        try
+        {
+            await socket.ConnectAsync(endpoint, token).ConfigureAwait(false);
+            return new ChromeDevToolsClient(socket);
+        }
+        catch { socket.Dispose(); throw; }
+    }
 
     public static async Task<ChromeDevToolsClient> ConnectAsync(int debuggingPort, CancellationToken cancellationToken)
     {

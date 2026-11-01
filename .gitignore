@@ -11,3 +11,4 @@ references/
 *.sln.docstates
 *Backup authentication codes*.txt
 update.key
+.qa/
