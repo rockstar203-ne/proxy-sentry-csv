@@ -16,6 +16,7 @@ if (args.Contains("--ads-fixture")) return await AdsPowerApiTests.FixtureAsync()
 var tests = new (string Name, Func<Task> Run)[]
 {
     ("AdsPower HTTP contract, pagination and ownership", AdsPowerApiTests.ContractAsync),
+    ("Bridge diagnostics verify identity and distinguish failure phases", BridgeDiagnosticsTests.RunAsync),
     ("AdsPower local access, lifecycle and port conflict", AdsPowerApiTests.LifecycleAsync),
     ("AdsPower port settings persist with compatible defaults", AdsPowerApiTests.SettingsAsync),
     ("CSV list export is lossless and preserves a locked destination", ListExportTests.RunAsync),

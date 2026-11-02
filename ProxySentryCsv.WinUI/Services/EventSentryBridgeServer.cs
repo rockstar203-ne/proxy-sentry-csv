@@ -36,6 +36,31 @@ public sealed class EventSentryBridgeServer : IDisposable
     private Task? _serverTask;
     private bool _compatibilityMode;
     private int _acquiring;
+    private volatile bool _listening;
+    private readonly SemaphoreSlim _connections = new(8, 8);
+    private readonly SemaphoreSlim _commands = new(1, 1);
+    private string _lastError = "";
+    private string _lastCommand = "";
+    private DateTimeOffset? _lastRequest;
+    private int _received;
+    public string DiagnosticState { get; private set; } = "Stopped";
+    public string DiagnosticSummary
+    {
+        get
+        {
+            lock (_gate) return $"State: {DiagnosticState}\nPipe: {PipeName}\nProtocol: {ProtocolVersion}\nRequests: {_received}\nLast request (UTC): {_lastRequest:O}\nLast command: {_lastCommand}\nLast error: {_lastError}\nAdsPower API acquisition lock: {_compatibilityMode}\nActive acquisitions: {_acquiring}\nLeases: {_leases.Count}";
+        }
+    }
+
+    private void SetDiagnosticState(string state, Exception? error = null)
+    {
+        lock (_gate)
+        {
+            DiagnosticState = state;
+            if (error is not null) _lastError = $"{error.GetType().Name} (0x{error.HResult:X8}): {error.Message}";
+        }
+        StateChanged?.Invoke();
+    }
 
     public bool TrySetCompatibilityMode(bool enabled)
     {
@@ -65,7 +90,7 @@ public sealed class EventSentryBridgeServer : IDisposable
 
     public event Action? StateChanged;
 
-    public bool IsRunning => _serverTask is not null && !_serverTask.IsCompleted;
+    public bool IsRunning => _listening && !_stop.IsCancellationRequested;
 
     public void Start()
     {
@@ -74,6 +99,7 @@ public sealed class EventSentryBridgeServer : IDisposable
             return;
         }
 
+        SetDiagnosticState("Starting");
         _serverTask = Task.Run(ServerLoopAsync);
     }
 
@@ -128,17 +154,21 @@ public sealed class EventSentryBridgeServer : IDisposable
 
     private async Task ServerLoopAsync()
     {
-        _log("Event Sentry bridge: Running.");
-        StateChanged?.Invoke();
         while (!_stop.IsCancellationRequested)
         {
             NamedPipeServerStream? pipe = null;
+            var entered = false;
             try
             {
+                await _connections.WaitAsync(_stop.Token);
+                entered = true;
                 pipe = CreatePipe();
+                _listening = true;
+                SetDiagnosticState("Listening");
                 await pipe.WaitForConnectionAsync(_stop.Token);
-                await HandleConnectionAsync(pipe);
+                _ = ServeConnectionAsync(pipe);
                 pipe = null;
+                entered = false;
             }
             catch (OperationCanceledException)
             {
@@ -148,10 +178,25 @@ public sealed class EventSentryBridgeServer : IDisposable
             catch (Exception ex)
             {
                 pipe?.Dispose();
+                _listening = false;
+                SetDiagnosticState("Error", ex);
                 _log($"Event Sentry bridge error: {ex.Message}");
                 await Task.Delay(500, _stop.Token).ContinueWith(_ => { }, TaskScheduler.Default);
             }
+            finally { if (entered) _connections.Release(); }
         }
+        _listening = false;
+        SetDiagnosticState("Stopped");
+    }
+
+    private async Task ServeConnectionAsync(NamedPipeServerStream pipe)
+    {
+        try { await HandleConnectionAsync(pipe); }
+        catch (Exception ex) when (!_stop.IsCancellationRequested)
+        { SetDiagnosticState("Client error", ex); }
+        catch (OperationCanceledException) { }
+        catch (Exception) when (_stop.IsCancellationRequested) { }
+        finally { pipe.Dispose(); _connections.Release(); }
     }
 
     private static NamedPipeServerStream CreatePipe()
@@ -188,7 +233,9 @@ public sealed class EventSentryBridgeServer : IDisposable
             try
             {
                 using var reader = new StreamReader(pipe, new UTF8Encoding(false), detectEncodingFromByteOrderMarks: false, leaveOpen: true);
-                var line = await reader.ReadLineAsync(_stop.Token);
+                using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
+                readTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+                var line = await reader.ReadLineAsync(readTimeout.Token);
                 if (string.IsNullOrWhiteSpace(line))
                 {
                     return;
@@ -201,9 +248,22 @@ public sealed class EventSentryBridgeServer : IDisposable
                 }
 
                 request = JsonSerializer.Deserialize<BridgeRequest>(line, JsonOptions) ?? new BridgeRequest();
+                lock (_gate)
+                {
+                    if (!(request.RequestId ?? "").StartsWith("diagnostic-", StringComparison.Ordinal))
+                    {
+                        _received++;
+                        _lastRequest = DateTimeOffset.UtcNow;
+                        _lastCommand = NormalizeCommand(request.Command) is "status" or "acquire_etix_profiles" or "set_profile_status" or "bring_to_front" or "release_etix_profiles"
+                            ? NormalizeCommand(request.Command) : "unsupported";
+                    }
+                }
+                StateChanged?.Invoke();
             }
             catch (Exception ex)
             {
+                lock (_gate) _lastError = $"Request read failed: {ex.GetType().Name}, 0x{ex.HResult:X8}";
+                StateChanged?.Invoke();
                 await WriteResponseAsync(pipe, BridgeResponse.Fail(ProtocolVersion, "", $"Invalid request: {ex.Message}"));
                 return;
             }
@@ -211,13 +271,31 @@ public sealed class EventSentryBridgeServer : IDisposable
             BridgeResponse response;
             try
             {
-                response = await HandleRequestAsync(request, _stop.Token);
+                // Status probes stay available during a long browser launch. Mutations remain serialized.
+                if (NormalizeCommand(request.Command) == "status") response = await HandleRequestAsync(request, _stop.Token);
+                else
+                {
+                    await _commands.WaitAsync(_stop.Token);
+                    try { response = await HandleRequestAsync(request, _stop.Token); }
+                    finally { _commands.Release(); }
+                }
             }
             catch (Exception ex)
             {
-                response = BridgeResponse.Fail(ProtocolVersion, request.RequestId, ex.Message);
+                response = BridgeResponse.Fail(ProtocolVersion, request.RequestId ?? "", ex.Message);
             }
 
+            if (!response.Ok)
+            {
+                lock (_gate) _lastError = request.ProtocolVersion != ProtocolVersion
+                    ? $"Protocol mismatch: client {request.ProtocolVersion}, server {ProtocolVersion}. Update both applications."
+                    : _compatibilityMode && NormalizeCommand(request.Command) == "acquire_etix_profiles"
+                        ? "Acquisition blocked by AdsPower compatibility mode."
+                        : NormalizeCommand(request.Command) == "acquire_etix_profiles" && NormalizeCommand(request.Browser) != "auto"
+                            ? "Legacy client browser selection. Update Event Sentry (browser=auto is required)."
+                            : $"Command {_lastCommand} was rejected; inspect Event Sentry's error for details.";
+                StateChanged?.Invoke();
+            }
             await WriteResponseAsync(pipe, response);
         }
     }
@@ -226,8 +304,9 @@ public sealed class EventSentryBridgeServer : IDisposable
     {
         var json = JsonSerializer.Serialize(response, JsonOptions);
         var bytes = Encoding.UTF8.GetBytes(json + "\n");
-        await pipe.WriteAsync(bytes);
-        await pipe.FlushAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await pipe.WriteAsync(bytes, timeout.Token);
+        await pipe.FlushAsync(timeout.Token);
     }
 
     private async Task<BridgeResponse> HandleRequestAsync(BridgeRequest request, CancellationToken cancellationToken)
@@ -270,7 +349,10 @@ public sealed class EventSentryBridgeServer : IDisposable
             {
                 SelectedCount = profiles.Count,
                 ReadyCount = ready,
-                BusyCount = busy
+                BusyCount = busy,
+                ServerProcessId = Environment.ProcessId,
+                ServerVersion = typeof(EventSentryBridgeServer).Assembly.GetName().Version?.ToString(),
+                AcquisitionBlocked = _compatibilityMode
             };
     }
 
@@ -810,6 +892,9 @@ public sealed class EventSentryBridgeServer : IDisposable
 
     private sealed record BridgeResponse
     {
+        public int? ServerProcessId { get; init; }
+        public string? ServerVersion { get; init; }
+        public bool? AcquisitionBlocked { get; init; }
         public int ProtocolVersion { get; init; }
         public string RequestId { get; init; } = "";
         public bool Ok { get; init; }

@@ -66,6 +66,29 @@ The port is saved between application launches. Set the same port in your API cl
 Changing the listener port leaves browser windows and API ownership intact. If the new port is unavailable,
 the adapter attempts to restore the previous listener and displays the actual running status.
 
+## Bridge Troubleshooting
+
+Open **Bridge diagnostics** next to the Event Sentry selection control, then **Test connection**.
+This performs a real protocol-1 status request, checks the responding process identity, and reports
+the Windows account, elevation, session, version, exact pipe name, last external request and server error.
+Self-tests do not replace the last external request in the report.
+
+On an affected computer, run the test, attempt a connection from Event Sentry, then test again and
+use **Copy report**. The report includes account/SID and local installation paths, but no proxy
+credentials, cookies or site URLs. Share it only with someone you trust.
+
+- `BRIDGE_ACCESS_DENIED`: compare Windows accounts and elevation; normally run both apps without administrator rights.
+- `BRIDGE_CONNECT_TIMEOUT`: check the pipe name, actual server state, duplicate instances, and security software.
+- `BRIDGE_RESPONSE_TIMEOUT`: the connection succeeded but no response arrived; check UI stalls or server workload.
+- `BRIDGE_OTHER_INSTANCE`: another Proxy Sentry copy answered. Identify the listed PID before closing anything.
+- `BRIDGE_PROTOCOL_MISMATCH`: update both applications.
+- `BRIDGE_API_LOCK`: status works, but AdsPower compatibility blocks Event Sentry acquisition. Disable compatibility mode.
+- `BRIDGE_OK` with zero selected/ready profiles: connectivity works; select profiles or inspect existing leases.
+
+The self-test runs as Proxy Sentry's user; it cannot prove that a different Windows account or elevation
+can connect. Updated Event Sentry shows the client-side error in the pool status tooltip instead of
+reporting every error as "start Proxy Sentry". Pipe permissions remain restricted to the current user.
+
 ## Build Commands
 
 ```powershell

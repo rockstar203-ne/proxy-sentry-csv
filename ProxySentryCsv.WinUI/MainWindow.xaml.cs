@@ -2727,7 +2727,8 @@ Jancy setup:
 
         EventSentryBridgeText.Text = _eventSentryBridge.IsRunning
             ? "Event Sentry bridge: Running"
-            : "Event Sentry bridge: Stopped";
+            : $"Event Sentry bridge: {_eventSentryBridge.DiagnosticState}";
+        ToolTipService.SetToolTip(EventSentryBridgeText, _eventSentryBridge.DiagnosticSummary);
     }
 
     private async Task RefreshCacheSizeAsync()

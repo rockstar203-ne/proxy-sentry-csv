@@ -131,6 +131,7 @@
                         FontWeight="SemiBold"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                         Text="Event Sentry bridge: Starting" />
+                    <Button Content="Bridge diagnostics" Click="BridgeDiagnostics_Click" />
             </local:AdaptiveWrapPanel>
 
             <Border
