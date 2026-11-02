@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../ProxySentryCsv.WinUI/Services/EventSentrySelection.cs" Link="Production/EventSentrySelection.cs" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="../ProxySentryCsv.WinUI/Services/BridgeDiagnostics.cs" Link="Production/BridgeDiagnostics.cs" />
     <Compile Include="../ProxySentryCsv.WinUI/Services/ProxyExporters.cs" Link="Production/ProxyExporters.cs" />

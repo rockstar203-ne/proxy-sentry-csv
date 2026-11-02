@@ -10,9 +10,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Proxy Sentry CSV</AssemblyName>
-    <Version>1.8.23</Version>
-    <AssemblyVersion>1.8.23.0</AssemblyVersion>
-    <FileVersion>1.8.23.0</FileVersion>
+    <Version>1.8.24</Version>
+    <AssemblyVersion>1.8.24.0</AssemblyVersion>
+    <FileVersion>1.8.24.0</FileVersion>
     <ApplicationIcon>..\ProxySentryCsv.WinUI\Assets\AppIcon.ico</ApplicationIcon>
   </PropertyGroup>
 </Project>

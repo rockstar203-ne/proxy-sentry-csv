@@ -15,6 +15,7 @@ if (args.Contains("--ads-fixture")) return await AdsPowerApiTests.FixtureAsync()
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("Event Sentry apply, empty selection, duplicates and explicit clear", EventSentrySelectionTests.RunAsync),
     ("AdsPower HTTP contract, pagination and ownership", AdsPowerApiTests.ContractAsync),
     ("Bridge diagnostics verify identity and distinguish failure phases", BridgeDiagnosticsTests.RunAsync),
     ("AdsPower local access, lifecycle and port conflict", AdsPowerApiTests.LifecycleAsync),

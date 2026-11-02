@@ -112,16 +112,17 @@
                         DisplayMemberPath="DisplayName"
                         PlaceholderText="Sync monitor"
                         SelectionChanged="SyncMonitorBox_SelectionChanged" />
-                    <Button
+                    <SplitButton
                         x:Name="SelectEventSentryButton"
                         Click="SelectForEventSentry_Click"
-                        Content="Select for Event Sentry">
-                        <Button.ContextFlyout>
+                        Content="Apply to Event Sentry"
+                        ToolTipService.ToolTip="Apply checked rows as the Event Sentry pool. Use the arrow to clear the saved pool.">
+                        <SplitButton.Flyout>
                             <MenuFlyout>
-                                <MenuFlyoutItem Text="Clear Event Sentry selection" Click="ClearEventSentrySelection_Click" />
+                                <MenuFlyoutItem x:Name="ClearEventSentryMenuItem" Text="Clear Event Sentry selection" Click="ClearEventSentrySelection_Click" />
                             </MenuFlyout>
-                        </Button.ContextFlyout>
-                    </Button>
+                        </SplitButton.Flyout>
+                    </SplitButton>
                     <TextBlock
                         x:Name="EventSentryBridgeText"
                         MaxWidth="230"

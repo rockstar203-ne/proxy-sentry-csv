@@ -2512,34 +2512,47 @@ Jancy setup:
         ShowSelectionSummary();
     }
 
-    private void SelectForEventSentry_Click(object sender, RoutedEventArgs e)
+    private async void SelectForEventSentry_Click(SplitButton sender, SplitButtonClickEventArgs e)
     {
-        var targets = GetAllLoadedProxies().Where(proxy => proxy.SyncSelected).ToList();
+        var rows = GetEventSentrySelectionRows();
+        var count = EventSentrySelection.ApplyChecked(rows);
 
-        if (targets.Count == 0)
+        if (count == 0)
         {
-            ShowMessage("Check rows in the Select column first, then press Select for Event Sentry.", InfoBarSeverity.Warning);
+            var saved = EventSentrySelection.CountSelected(rows);
+            await new ContentDialog
+            {
+                Title = "No profiles checked",
+                Content = $"Check the required rows in the Select column, then apply them to Event Sentry. The existing pool ({saved} profiles) has not changed. To clear it, use the arrow beside Apply to Event Sentry.",
+                CloseButtonText = "OK",
+                XamlRoot = Content.XamlRoot
+            }.ShowAsync();
             return;
         }
 
-        var selectedIds = targets
-            .Select(proxy => proxy.StableId)
-            .ToHashSet(StringComparer.Ordinal);
-        foreach (var proxy in GetAllLoadedProxies())
-        {
-            proxy.UseForEventSentry = selectedIds.Contains(proxy.StableId);
-        }
-
-        SaveState();
         UpdateSummary();
-        ShowMessage($"Event Sentry profiles selected: {targets.Count}.", InfoBarSeverity.Success);
+        try { SaveStateCore(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            ShowMessage($"Event Sentry pool applied ({count} profiles), but could not be saved: {ex.Message}", InfoBarSeverity.Error);
+            return;
+        }
+        ShowMessage($"Event Sentry profiles selected: {count}.", InfoBarSeverity.Success);
     }
+
+    private List<ProxyEntry> GetEventSentrySelectionRows() => ProxyLists
+        .Where(list => !list.IsFavorites).SelectMany(list => list.Items).ToList();
 
     private void ClearEventSentrySelection_Click(object sender, RoutedEventArgs e)
     {
-        foreach (var proxy in GetAllLoadedProxies()) proxy.UseForEventSentry = false;
-        SaveState();
+        EventSentrySelection.Clear(GetEventSentrySelectionRows());
         UpdateSummary();
+        try { SaveStateCore(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            ShowMessage($"Event Sentry pool cleared, but could not be saved: {ex.Message}", InfoBarSeverity.Error);
+            return;
+        }
         ShowMessage("Event Sentry proxy selection cleared.", InfoBarSeverity.Success);
     }
 
@@ -2720,14 +2733,13 @@ Jancy setup:
         var selected = GetAllLoadedProxies().Count(proxy => proxy.UseForEventSentry);
         if (SelectEventSentryButton is not null)
         {
-            SelectEventSentryButton.Content = selected > 0
-                ? $"Event Sentry: {selected} selected - Clear"
-                : "Select for Event Sentry";
+            SelectEventSentryButton.Content = "Apply to Event Sentry";
+            ClearEventSentryMenuItem.IsEnabled = selected > 0;
         }
 
         EventSentryBridgeText.Text = _eventSentryBridge.IsRunning
-            ? "Event Sentry bridge: Running"
-            : $"Event Sentry bridge: {_eventSentryBridge.DiagnosticState}";
+            ? $"Event Sentry: {selected} profiles | Running"
+            : $"Event Sentry: {selected} profiles | {_eventSentryBridge.DiagnosticState}";
         ToolTipService.SetToolTip(EventSentryBridgeText, _eventSentryBridge.DiagnosticSummary);
     }
 
